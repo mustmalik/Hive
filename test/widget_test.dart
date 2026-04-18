@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:hive_flutter_v1/application/models/home_cell_preview.dart';
+import 'package:hive_flutter_v1/application/models/home_dashboard_snapshot.dart';
 import 'package:hive_flutter_v1/application/services/permission_service.dart';
+import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
 import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
@@ -56,7 +59,10 @@ void main() {
     });
 
     await tester.pumpWidget(
-      MaterialApp(theme: AppTheme.darkTheme, home: const HomeScreen()),
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: HomeScreen(homeDashboardService: _FakeHomeDashboardService()),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -91,5 +97,33 @@ class _FakePermissionService implements PermissionService {
   @override
   Future<PhotoPermissionStatus> requestPhotoPermission() async {
     return PhotoPermissionStatus.fullAccess;
+  }
+}
+
+class _FakeHomeDashboardService implements HomeDashboardService {
+  @override
+  Future<HomeDashboardSnapshot> loadDashboard() async {
+    return HomeDashboardSnapshot(
+      totalAssetCount: 529,
+      totalCellCount: 12,
+      lastCompletedScanAt: DateTime.now().subtract(const Duration(hours: 2)),
+      visibleCells: const [
+        HomeCellPreview(
+          id: 'pets',
+          name: 'Pets',
+          assetCount: 128,
+          summary: 'Warm moments and familiar faces',
+          styleKey: 'pets',
+          featured: true,
+        ),
+        HomeCellPreview(
+          id: 'travel',
+          name: 'Travel',
+          assetCount: 84,
+          summary: 'Trips, weekends, and new places',
+          styleKey: 'travel',
+        ),
+      ],
+    );
   }
 }

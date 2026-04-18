@@ -4,28 +4,34 @@ import '../../application/repositories/folder_cell_repository.dart';
 import '../../application/repositories/media_asset_repository.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/home_dashboard_service.dart';
+import '../../application/services/media_library_service.dart';
 import '../repositories/in_memory_folder_cell_repository.dart';
 import '../repositories/in_memory_media_asset_repository.dart';
 import '../repositories/in_memory_scan_run_repository.dart';
+import 'photo_manager_media_library_service.dart';
 
 class InMemoryHomeDashboardService implements HomeDashboardService {
   InMemoryHomeDashboardService({
     required MediaAssetRepository mediaAssetRepository,
     required FolderCellRepository folderCellRepository,
     required ScanRunRepository scanRunRepository,
+    MediaLibraryService? mediaLibraryService,
   }) : _mediaAssetRepository = mediaAssetRepository,
        _folderCellRepository = folderCellRepository,
-       _scanRunRepository = scanRunRepository;
+       _scanRunRepository = scanRunRepository,
+       _mediaLibraryService = mediaLibraryService;
 
   final MediaAssetRepository _mediaAssetRepository;
   final FolderCellRepository _folderCellRepository;
   final ScanRunRepository _scanRunRepository;
+  final MediaLibraryService? _mediaLibraryService;
 
   factory InMemoryHomeDashboardService.seeded() {
     return InMemoryHomeDashboardService(
       mediaAssetRepository: InMemoryMediaAssetRepository.seeded(),
       folderCellRepository: InMemoryFolderCellRepository.seeded(),
       scanRunRepository: InMemoryScanRunRepository.seeded(),
+      mediaLibraryService: const PhotoManagerMediaLibraryService(),
     );
   }
 
@@ -59,6 +65,9 @@ class InMemoryHomeDashboardService implements HomeDashboardService {
     final assets = await _mediaAssetRepository.getAllAssets();
     final cells = await _folderCellRepository.getAllCells();
     final latestRun = await _scanRunRepository.getLatestRun();
+    final totalAssetCount = await _resolveTotalAssetCount(
+      fallbackCount: assets.length,
+    );
 
     final visibleCells = <HomeCellPreview>[];
 
@@ -82,10 +91,24 @@ class InMemoryHomeDashboardService implements HomeDashboardService {
     }
 
     return HomeDashboardSnapshot(
-      totalAssetCount: assets.length,
+      totalAssetCount: totalAssetCount,
       totalCellCount: cells.length,
       lastCompletedScanAt: latestRun?.completedAt,
       visibleCells: visibleCells,
     );
+  }
+
+  Future<int> _resolveTotalAssetCount({required int fallbackCount}) async {
+    final mediaLibraryService = _mediaLibraryService;
+
+    if (mediaLibraryService == null) {
+      return fallbackCount;
+    }
+
+    try {
+      return await mediaLibraryService.getEstimatedAssetCount();
+    } catch (_) {
+      return fallbackCount;
+    }
   }
 }
