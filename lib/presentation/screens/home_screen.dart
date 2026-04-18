@@ -1,52 +1,33 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/home_dashboard_snapshot.dart';
+import '../../application/services/home_dashboard_service.dart';
+import '../../data/services/in_memory_home_dashboard_service.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_cell_card.dart';
 import '../widgets/hive_shell_background.dart';
 import 'folder_detail_screen.dart';
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key, this.homeDashboardService});
 
-  static const _cells = [
-    _MockHiveCell(
-      name: 'Pets',
-      assetCount: 128,
-      accentColor: Color(0xFFE59E4D),
-      icon: Icons.pets_rounded,
-      note: 'Warm moments and familiar faces',
-      featured: true,
-    ),
-    _MockHiveCell(
-      name: 'Travel',
-      assetCount: 84,
-      accentColor: Color(0xFFF0C777),
-      icon: Icons.flight_takeoff_rounded,
-      note: 'Trips, weekends, and new places',
-    ),
-    _MockHiveCell(
-      name: 'Food',
-      assetCount: 62,
-      accentColor: Color(0xFFC88538),
-      icon: Icons.restaurant_rounded,
-      note: 'Plates worth saving',
-    ),
-    _MockHiveCell(
-      name: 'Basketball',
-      assetCount: 41,
-      accentColor: Color(0xFFB8732C),
-      icon: Icons.sports_basketball_rounded,
-      note: 'Game nights and court-side shots',
-      featured: true,
-    ),
-    _MockHiveCell(
-      name: 'Unsorted',
-      assetCount: 214,
-      accentColor: Color(0xFF8F6B46),
-      icon: Icons.auto_awesome_mosaic_rounded,
-      note: 'The next clean-up pass',
-    ),
-  ];
+  final HomeDashboardService? homeDashboardService;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  late final HomeDashboardService _homeDashboardService;
+  late final Future<HomeDashboardSnapshot> _dashboardFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _homeDashboardService =
+        widget.homeDashboardService ?? InMemoryHomeDashboardService.seeded();
+    _dashboardFuture = _homeDashboardService.loadDashboard();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -58,313 +39,493 @@ class HomeScreen extends StatelessWidget {
         child: SafeArea(
           top: false,
           bottom: false,
-          child: SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 6),
-                Row(
+          child: FutureBuilder<HomeDashboardSnapshot>(
+            future: _dashboardFuture,
+            builder: (context, snapshot) {
+              final dashboard = snapshot.data;
+
+              return SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const _HomeBrandMark(),
-                    const SizedBox(width: 14),
-                    Expanded(
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const _HomeBrandMark(),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'HIVE',
+                                style: theme.textTheme.titleLarge?.copyWith(
+                                  color: HiveColors.honey,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'A local-first home for your gallery',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: HiveColors.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: HiveColors.surface.withValues(alpha: 0.82),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: HiveColors.outline),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.verified_user_outlined,
+                                size: 16,
+                                color: HiveColors.honey,
+                              ),
+                              SizedBox(width: 8),
+                              Text(
+                                'Local Only',
+                                style: TextStyle(
+                                  color: HiveColors.textSecondary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(32),
+                        gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [Color(0xFF382616), Color(0xFF201914)],
+                        ),
+                        border: Border.all(color: HiveColors.outline),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x26000000),
+                            blurRadius: 24,
+                            offset: Offset(0, 16),
+                          ),
+                        ],
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'HIVE',
-                            style: theme.textTheme.titleLarge?.copyWith(
-                              color: HiveColors.honey,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'A local-first home for your gallery',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: HiveColors.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: HiveColors.surface.withValues(alpha: 0.82),
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: HiveColors.outline),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.verified_user_outlined,
-                            size: 16,
-                            color: HiveColors.honey,
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            'Local Only',
-                            style: TextStyle(
-                              color: HiveColors.textSecondary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(32),
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [Color(0xFF382616), Color(0xFF201914)],
-                    ),
-                    border: Border.all(color: HiveColors.outline),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x26000000),
-                        blurRadius: 24,
-                        offset: Offset(0, 16),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: HiveColors.honey.withValues(alpha: 0.13),
-                          borderRadius: BorderRadius.circular(999),
-                          border: Border.all(
-                            color: HiveColors.honey.withValues(alpha: 0.16),
-                          ),
-                        ),
-                        child: Text(
-                          'Gallery Home',
-                          style: theme.textTheme.labelLarge?.copyWith(
-                            color: HiveColors.honey,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      Text(
-                        'Your cells are ready when the next scan is.',
-                        style: theme.textTheme.headlineMedium,
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Build a calmer layer on top of your library without touching a single original Apple Photos asset.',
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          color: HiveColors.textSecondary,
-                        ),
-                      ),
-                      const SizedBox(height: 22),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'Scan pipeline foundation is ready. Real scan execution comes next.',
-                                    ),
-                                  ),
-                                );
-                              },
-                              icon: const Icon(Icons.hive_outlined),
-                              label: const Text('Start Scan'),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
                           Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 14,
-                              vertical: 14,
+                              horizontal: 12,
+                              vertical: 8,
                             ),
                             decoration: BoxDecoration(
-                              color: HiveColors.surface.withValues(alpha: 0.78),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: HiveColors.outline),
+                              color: HiveColors.honey.withValues(alpha: 0.13),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: HiveColors.honey.withValues(alpha: 0.16),
+                              ),
+                            ),
+                            child: Text(
+                              'Gallery Home',
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                color: HiveColors.honey,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          Text(
+                            'Your cells are ready when the next scan is.',
+                            style: theme.textTheme.headlineMedium,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Build a calmer layer on top of your library without touching a single original Apple Photos asset.',
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              color: HiveColors.textSecondary,
+                            ),
+                          ),
+                          const SizedBox(height: 22),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  onPressed: () {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Scan pipeline foundation is ready. Real scan execution comes next.',
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(Icons.hive_outlined),
+                                  label: const Text('Start Scan'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 14,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: HiveColors.surface.withValues(
+                                    alpha: 0.78,
+                                  ),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: HiveColors.outline),
+                                ),
+                                child: const Icon(
+                                  Icons.chevron_right_rounded,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _StatsStrip(
+                      totalAssets: dashboard?.totalAssetCount,
+                      totalCells: dashboard?.totalCellCount,
+                      lastScanLabel: _formatLastScanLabel(
+                        dashboard?.lastCompletedScanAt,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Cells',
+                                style: theme.textTheme.headlineSmall,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'A premium preview of your next organization layer.',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: HiveColors.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: HiveColors.surface.withValues(alpha: 0.82),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: HiveColors.outline),
+                          ),
+                          child: Text(
+                            dashboard == null
+                                ? 'Loading'
+                                : '${dashboard.visibleCells.length} visible',
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              color: HiveColors.textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    if (dashboard == null)
+                      const _HomeLoadingState()
+                    else
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final itemWidth = (constraints.maxWidth - 14) / 2;
+
+                          return Wrap(
+                            spacing: 14,
+                            runSpacing: 14,
+                            children: [
+                              for (
+                                var index = 0;
+                                index < dashboard.visibleCells.length;
+                                index++
+                              )
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                    top: index.isOdd ? 18 : 0,
+                                  ),
+                                  child: SizedBox(
+                                    width: itemWidth,
+                                    child: HiveCellCard(
+                                      title: dashboard.visibleCells[index].name,
+                                      subtitle:
+                                          dashboard.visibleCells[index].summary,
+                                      assetCount: dashboard
+                                          .visibleCells[index]
+                                          .assetCount,
+                                      accentColor: _styleFor(
+                                        dashboard.visibleCells[index].styleKey,
+                                      ).color,
+                                      icon: _styleFor(
+                                        dashboard.visibleCells[index].styleKey,
+                                      ).icon,
+                                      featured: dashboard
+                                          .visibleCells[index]
+                                          .featured,
+                                      onTap: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) => FolderDetailScreen(
+                                              cellName: dashboard
+                                                  .visibleCells[index]
+                                                  .name,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
+                      ),
+                    const SizedBox(height: 22),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        color: HiveColors.surfaceElevated.withValues(
+                          alpha: 0.92,
+                        ),
+                        borderRadius: BorderRadius.circular(26),
+                        border: Border.all(color: HiveColors.outline),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            height: 42,
+                            width: 42,
+                            decoration: BoxDecoration(
+                              color: HiveColors.surfaceMuted,
+                              borderRadius: BorderRadius.circular(14),
                             ),
                             child: const Icon(
-                              Icons.chevron_right_rounded,
+                              Icons.auto_awesome_rounded,
                               size: 20,
                             ),
                           ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 18),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final compact = constraints.maxWidth < 420;
-                    final cardWidth = compact
-                        ? constraints.maxWidth
-                        : (constraints.maxWidth - 12) / 3;
-
-                    return Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        _StatCard(
-                          width: cardWidth,
-                          label: 'Total Assets',
-                          value: '529',
-                        ),
-                        _StatCard(
-                          width: cardWidth,
-                          label: 'Total Cells',
-                          value: '12',
-                        ),
-                        _StatCard(
-                          width: cardWidth,
-                          label: 'Last Scan',
-                          value: 'Today',
-                        ),
-                      ],
-                    );
-                  },
-                ),
-                const SizedBox(height: 28),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Cells', style: theme.textTheme.headlineSmall),
-                          const SizedBox(height: 4),
-                          Text(
-                            'A premium preview of your next organization layer.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: HiveColors.textSecondary,
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Ready for the scan foundation',
+                                  style: theme.textTheme.titleLarge,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'This shell is prepared for real asset counts, generated cells, and scan history as soon as the pipeline gets wired in.',
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    color: HiveColors.textSecondary,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: HiveColors.surface.withValues(alpha: 0.82),
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: HiveColors.outline),
-                      ),
-                      child: Text(
-                        '${_cells.length} visible',
-                        style: theme.textTheme.labelLarge?.copyWith(
-                          color: HiveColors.textSecondary,
-                        ),
-                      ),
-                    ),
+                    const SizedBox(height: 42),
                   ],
                 ),
-                const SizedBox(height: 18),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final itemWidth = (constraints.maxWidth - 14) / 2;
-
-                    return Wrap(
-                      spacing: 14,
-                      runSpacing: 14,
-                      children: [
-                        for (var index = 0; index < _cells.length; index++)
-                          Padding(
-                            padding: EdgeInsets.only(top: index.isOdd ? 18 : 0),
-                            child: SizedBox(
-                              width: itemWidth,
-                              child: HiveCellCard(
-                                title: _cells[index].name,
-                                subtitle: _cells[index].note,
-                                assetCount: _cells[index].assetCount,
-                                accentColor: _cells[index].accentColor,
-                                icon: _cells[index].icon,
-                                featured: _cells[index].featured,
-                                onTap: () {
-                                  Navigator.of(context).push(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => FolderDetailScreen(
-                                        cellName: _cells[index].name,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
-                ),
-                const SizedBox(height: 22),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: HiveColors.surfaceElevated.withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(26),
-                    border: Border.all(color: HiveColors.outline),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        height: 42,
-                        width: 42,
-                        decoration: BoxDecoration(
-                          color: HiveColors.surfaceMuted,
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: const Icon(Icons.auto_awesome_rounded, size: 20),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Ready for the scan foundation',
-                              style: theme.textTheme.titleLarge,
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'This shell is prepared for real asset counts, generated cells, and scan history as soon as the pipeline gets wired in.',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: HiveColors.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              );
+            },
           ),
         ),
       ),
+    );
+  }
+
+  String _formatLastScanLabel(DateTime? lastCompletedScanAt) {
+    if (lastCompletedScanAt == null) {
+      return 'Not yet';
+    }
+
+    final now = DateTime.now();
+    final difference = now.difference(lastCompletedScanAt);
+
+    if (difference.inDays == 0) {
+      return 'Today';
+    }
+
+    if (difference.inDays == 1) {
+      return 'Yesterday';
+    }
+
+    return '${difference.inDays}d ago';
+  }
+
+  _HomeCellStyle _styleFor(String styleKey) {
+    return switch (styleKey) {
+      'pets' => const _HomeCellStyle(
+        color: Color(0xFFE59E4D),
+        icon: Icons.pets_rounded,
+      ),
+      'travel' => const _HomeCellStyle(
+        color: Color(0xFFF0C777),
+        icon: Icons.flight_takeoff_rounded,
+      ),
+      'food' => const _HomeCellStyle(
+        color: Color(0xFFC88538),
+        icon: Icons.restaurant_rounded,
+      ),
+      'basketball' => const _HomeCellStyle(
+        color: Color(0xFFB8732C),
+        icon: Icons.sports_basketball_rounded,
+      ),
+      'unsorted' => const _HomeCellStyle(
+        color: Color(0xFF8F6B46),
+        icon: Icons.auto_awesome_mosaic_rounded,
+      ),
+      _ => const _HomeCellStyle(
+        color: HiveColors.honey,
+        icon: Icons.folder_open_rounded,
+      ),
+    };
+  }
+}
+
+class _StatsStrip extends StatelessWidget {
+  const _StatsStrip({
+    required this.totalAssets,
+    required this.totalCells,
+    required this.lastScanLabel,
+  });
+
+  final int? totalAssets;
+  final int? totalCells;
+  final String lastScanLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: HiveColors.surface.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _StatsItem(
+              label: 'Assets',
+              value: totalAssets?.toString() ?? '...',
+            ),
+          ),
+          const _StatsDivider(),
+          Expanded(
+            child: _StatsItem(
+              label: 'Cells',
+              value: totalCells?.toString() ?? '...',
+            ),
+          ),
+          const _StatsDivider(),
+          Expanded(
+            child: _StatsItem(
+              label: 'Last Scan',
+              value: lastScanLabel,
+              alignEnd: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatsItem extends StatelessWidget {
+  const _StatsItem({
+    required this.label,
+    required this.value,
+    this.alignEnd = false,
+  });
+
+  final String label;
+  final String value;
+  final bool alignEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final alignment = alignEnd
+        ? CrossAxisAlignment.end
+        : CrossAxisAlignment.start;
+
+    return Column(
+      crossAxisAlignment: alignment,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: HiveColors.textSecondary,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatsDivider extends StatelessWidget {
+  const _StatsDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 34,
+      width: 1,
+      margin: const EdgeInsets.symmetric(horizontal: 12),
+      color: HiveColors.outline,
+    );
+  }
+}
+
+class _HomeLoadingState extends StatelessWidget {
+  const _HomeLoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 32),
+      child: Center(child: CircularProgressIndicator()),
     );
   }
 }
@@ -404,60 +565,9 @@ class _HomeBrandMark extends StatelessWidget {
   }
 }
 
-class _StatCard extends StatelessWidget {
-  const _StatCard({
-    required this.width,
-    required this.label,
-    required this.value,
-  });
+class _HomeCellStyle {
+  const _HomeCellStyle({required this.color, required this.icon});
 
-  final double width;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Container(
-      width: width,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-      decoration: BoxDecoration(
-        color: HiveColors.surface.withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: HiveColors.outline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: HiveColors.textSecondary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(value, style: theme.textTheme.headlineSmall),
-        ],
-      ),
-    );
-  }
-}
-
-class _MockHiveCell {
-  const _MockHiveCell({
-    required this.name,
-    required this.assetCount,
-    required this.accentColor,
-    required this.icon,
-    required this.note,
-    this.featured = false,
-  });
-
-  final String name;
-  final int assetCount;
-  final Color accentColor;
+  final Color color;
   final IconData icon;
-  final String note;
-  final bool featured;
 }

@@ -5,6 +5,7 @@ import 'package:hive_flutter_v1/application/services/permission_service.dart';
 import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
+import 'package:hive_flutter_v1/presentation/theme/app_theme.dart';
 
 void main() {
   testWidgets('HIVE flows from splash to onboarding to permission', (
@@ -55,8 +56,9 @@ void main() {
     });
 
     await tester.pumpWidget(
-      MaterialApp(theme: ThemeData.dark(), home: const HomeScreen()),
+      MaterialApp(theme: AppTheme.darkTheme, home: const HomeScreen()),
     );
+    await tester.pumpAndSettle();
 
     expect(find.text('Pets'), findsOneWidget);
 
