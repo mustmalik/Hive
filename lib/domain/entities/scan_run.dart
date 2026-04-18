@@ -10,6 +10,9 @@ class ScanRun {
     this.classifiedAssetCount = 0,
     this.generatedCellCount = 0,
     this.errorMessage,
+    this.currentStageLabel,
+    this.currentItemTitle,
+    this.latestDetectedCellName,
   });
 
   final String id;
@@ -20,6 +23,16 @@ class ScanRun {
   final int classifiedAssetCount;
   final int generatedCellCount;
   final String? errorMessage;
+  final String? currentStageLabel;
+  final String? currentItemTitle;
+  final String? latestDetectedCellName;
+
+  double get progress => discoveredAssetCount == 0
+      ? 0
+      : classifiedAssetCount / discoveredAssetCount;
+
+  bool get isRunning =>
+      status == ScanRunStatus.queued || status == ScanRunStatus.running;
 
   bool get isTerminal =>
       status == ScanRunStatus.completed ||

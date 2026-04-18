@@ -2,16 +2,24 @@ import 'package:flutter/material.dart';
 
 import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
+import '../../application/services/scan_coordinator.dart';
 import '../../data/services/in_memory_home_dashboard_service.dart';
+import '../../data/services/simulated_scan_coordinator.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_cell_card.dart';
 import '../widgets/hive_shell_background.dart';
 import 'folder_detail_screen.dart';
+import 'scan_progress_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, this.homeDashboardService});
+  const HomeScreen({
+    super.key,
+    this.homeDashboardService,
+    this.createScanCoordinator,
+  });
 
   final HomeDashboardService? homeDashboardService;
+  final ScanCoordinator Function()? createScanCoordinator;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -165,10 +173,13 @@ class _HomeScreenState extends State<HomeScreen> {
                               Expanded(
                                 child: ElevatedButton.icon(
                                   onPressed: () {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          'Scan pipeline foundation is ready. Real scan execution comes next.',
+                                    Navigator.of(context).push(
+                                      MaterialPageRoute<void>(
+                                        builder: (_) => ScanProgressScreen(
+                                          scanCoordinator:
+                                              widget.createScanCoordinator
+                                                  ?.call() ??
+                                              SimulatedScanCoordinator.seeded(),
                                         ),
                                       ),
                                     );
