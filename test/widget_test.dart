@@ -2,6 +2,8 @@ import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:hive_flutter_v1/application/services/permission_service.dart';
+import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
 
 void main() {
@@ -15,7 +17,9 @@ void main() {
       tester.view.resetDevicePixelRatio();
     });
 
-    await tester.pumpWidget(const HiveApp());
+    await tester.pumpWidget(
+      const HiveApp(permissionService: _FakePermissionService()),
+    );
 
     expect(find.text('HIVE'), findsOneWidget);
     expect(find.text('Get Started'), findsOneWidget);
@@ -36,6 +40,29 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Privacy & Access'), findsOneWidget);
-    expect(find.text('Your photos stay private.'), findsOneWidget);
+    expect(find.text('Let HIVE organize locally.'), findsOneWidget);
+    expect(find.text('Allow Photo Access'), findsOneWidget);
   });
+}
+
+class _FakePermissionService implements PermissionService {
+  const _FakePermissionService();
+
+  @override
+  Future<PhotoPermissionStatus> getPhotoPermissionStatus() async {
+    return PhotoPermissionStatus.notRequested;
+  }
+
+  @override
+  Future<void> openPhotoSettings() async {}
+
+  @override
+  Future<PhotoPermissionStatus> presentLimitedPhotoPicker() async {
+    return PhotoPermissionStatus.limited;
+  }
+
+  @override
+  Future<PhotoPermissionStatus> requestPhotoPermission() async {
+    return PhotoPermissionStatus.fullAccess;
+  }
 }

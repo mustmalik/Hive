@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../../application/services/permission_service.dart';
 import 'onboarding_screen.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 
 class SplashScreen extends StatelessWidget {
-  const SplashScreen({super.key});
+  const SplashScreen({super.key, this.permissionService});
+
+  final PermissionService? permissionService;
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +88,9 @@ class SplashScreen extends StatelessWidget {
                           onPressed: () {
                             Navigator.of(context).push(
                               MaterialPageRoute<void>(
-                                builder: (_) => const OnboardingScreen(),
+                                builder: (_) => OnboardingScreen(
+                                  permissionService: permissionService,
+                                ),
                               ),
                             );
                           },

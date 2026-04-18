@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'application/services/permission_service.dart';
 import 'presentation/screens/splash_screen.dart';
 import 'presentation/theme/app_theme.dart';
 
@@ -8,7 +9,9 @@ void main() {
 }
 
 class HiveApp extends StatelessWidget {
-  const HiveApp({super.key});
+  const HiveApp({super.key, this.permissionService});
+
+  final PermissionService? permissionService;
 
   @override
   Widget build(BuildContext context) {
@@ -18,7 +21,7 @@ class HiveApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       theme: AppTheme.darkTheme,
       darkTheme: AppTheme.darkTheme,
-      home: const SplashScreen(),
+      home: SplashScreen(permissionService: permissionService),
     );
   }
 }

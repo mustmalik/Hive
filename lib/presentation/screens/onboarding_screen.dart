@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 
+import '../../application/services/permission_service.dart';
 import 'permission_screen.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 import '../widgets/onboarding_page_indicator.dart';
 
 class OnboardingScreen extends StatefulWidget {
-  const OnboardingScreen({super.key});
+  const OnboardingScreen({super.key, this.permissionService});
+
+  final PermissionService? permissionService;
 
   @override
   State<OnboardingScreen> createState() => _OnboardingScreenState();
@@ -47,9 +50,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   void _goToPermission() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => const PermissionScreen()));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            PermissionScreen(permissionService: widget.permissionService),
+      ),
+    );
   }
 
   Future<void> _nextStep() async {
