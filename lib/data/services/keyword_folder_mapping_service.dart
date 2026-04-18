@@ -1,3 +1,4 @@
+import '../../application/models/asset_mapping_explanation.dart';
 import '../../application/services/folder_mapping_service.dart';
 import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/folder_cell.dart';
@@ -14,19 +15,24 @@ class KeywordFolderMappingService implements FolderMappingService {
       cellName: 'Pets',
       description: 'Pets, familiar faces, and daily companions',
       keywords: {
-        'animal',
-        'cat',
-        'cats',
         'dog',
         'dogs',
+        'puppy',
+        'canine',
         'pet',
         'pets',
-        'puppy',
+        'animal',
+        'mammal',
+        'domestic animal',
+        'companion animal',
+        'domestic dog',
+        'golden retriever',
+        'retriever',
+        'cat',
+        'cats',
         'kitten',
-        'canine',
         'feline',
-        'horse',
-        'bird',
+        'domestic cat',
       },
     ),
     _CellRule(
@@ -103,6 +109,9 @@ class KeywordFolderMappingService implements FolderMappingService {
     keywords: {},
   );
 
+  static const double _fallbackThreshold = 0.24;
+  static const int _maxExplanationLabels = 4;
+
   final DateTime Function() _now;
 
   @override
@@ -117,20 +126,21 @@ class KeywordFolderMappingService implements FolderMappingService {
     final coverAssetIdByCellId = <String, String>{};
 
     for (final asset in assets) {
-      final matchedRule = _resolveRule(
+      final explanation = explainPlacement(
+        asset: asset,
         labels: labelsByAssetId[asset.id] ?? const [],
       );
 
       assetsByCellId
-          .putIfAbsent(matchedRule.cellId, () => <String>[])
+          .putIfAbsent(explanation.cellId, () => <String>[])
           .add(asset.id);
 
-      if (!coverAssetIdByCellId.containsKey(matchedRule.cellId)) {
-        coverAssetIdByCellId[matchedRule.cellId] = asset.id;
+      if (!coverAssetIdByCellId.containsKey(explanation.cellId)) {
+        coverAssetIdByCellId[explanation.cellId] = asset.id;
       }
 
       final labelIds = labelIdsByCellId.putIfAbsent(
-        matchedRule.cellId,
+        explanation.cellId,
         () => <String>{},
       );
       for (final label
@@ -164,50 +174,139 @@ class KeywordFolderMappingService implements FolderMappingService {
         .toList(growable: false);
   }
 
-  _CellRule _resolveRule({required List<ClassificationLabel> labels}) {
-    if (labels.isEmpty) {
-      return _unsortedRule;
+  @override
+  AssetMappingExplanation explainPlacement({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+  }) {
+    final sortedLabels = List<ClassificationLabel>.from(labels)
+      ..sort((left, right) => right.confidence.compareTo(left.confidence));
+    final topLabels = sortedLabels
+        .take(_maxExplanationLabels)
+        .toList(growable: false);
+
+    if (topLabels.isEmpty) {
+      return AssetMappingExplanation(
+        cellId: _unsortedRule.cellId,
+        cellName: _unsortedRule.cellName,
+        score: 0,
+        usedFallback: true,
+        topLabels: const [],
+      );
     }
 
-    var bestRule = _unsortedRule;
-    var bestScore = 0.0;
-
+    _RuleScore? bestScore;
     for (final rule in _rules) {
-      final score = _scoreRule(rule: rule, labels: labels);
-      if (score > bestScore) {
-        bestScore = score;
-        bestRule = rule;
+      final current = _scoreRule(rule: rule, labels: topLabels);
+      if (bestScore == null || current.score > bestScore.score) {
+        bestScore = current;
       }
     }
 
-    if (bestScore <= 0) {
-      return _unsortedRule;
+    if (bestScore == null || bestScore.score < _fallbackThreshold) {
+      return AssetMappingExplanation(
+        cellId: _unsortedRule.cellId,
+        cellName: _unsortedRule.cellName,
+        score: bestScore?.score ?? 0,
+        usedFallback: true,
+        topLabels: topLabels,
+        matchedKeywords: bestScore?.matchedKeywords ?? const [],
+      );
     }
 
-    return bestRule;
+    return AssetMappingExplanation(
+      cellId: bestScore.rule.cellId,
+      cellName: bestScore.rule.cellName,
+      score: bestScore.score,
+      usedFallback: false,
+      topLabels: topLabels,
+      matchedKeywords: bestScore.matchedKeywords,
+    );
   }
 
-  double _scoreRule({
+  _RuleScore _scoreRule({
     required _CellRule rule,
     required List<ClassificationLabel> labels,
   }) {
     var score = 0.0;
+    final matchedKeywords = <String>{};
 
-    for (final label in labels) {
-      final haystacks = [
-        label.displayName.toLowerCase(),
-        label.key.toLowerCase(),
-      ];
+    for (var index = 0; index < labels.length; index++) {
+      final label = labels[index];
+      final normalized = _normalize(label.displayName);
+      final tokens = _tokenize(normalized);
+      final rankWeight = 1 - (index * 0.12);
+      final effectiveWeight = rankWeight < 0.55 ? 0.55 : rankWeight;
 
       for (final keyword in rule.keywords) {
-        if (haystacks.any((value) => value.contains(keyword))) {
-          score += label.confidence;
-          break;
+        final keywordMatch = _keywordMatch(
+          keyword: keyword,
+          tokens: tokens,
+          normalized: normalized,
+        );
+        if (keywordMatch <= 0) {
+          continue;
         }
+
+        score += label.confidence * effectiveWeight * keywordMatch;
+        matchedKeywords.add(keyword);
       }
     }
 
-    return score;
+    return _RuleScore(
+      rule: rule,
+      score: score,
+      matchedKeywords: matchedKeywords.toList(growable: false),
+    );
+  }
+
+  double _keywordMatch({
+    required String keyword,
+    required Set<String> tokens,
+    required String normalized,
+  }) {
+    final normalizedKeyword = _normalize(keyword);
+    if (normalized.contains(normalizedKeyword) ||
+        normalizedKeyword.contains(normalized)) {
+      return 1.0;
+    }
+
+    final keywordTokens = _tokenize(normalizedKeyword);
+    if (keywordTokens.isEmpty) {
+      return 0;
+    }
+
+    final overlap = tokens.intersection(keywordTokens).length;
+    if (overlap == 0) {
+      return 0;
+    }
+
+    if (overlap == keywordTokens.length || overlap == tokens.length) {
+      return 0.92;
+    }
+
+    final coverage = overlap / keywordTokens.length;
+    if (coverage >= 0.5) {
+      return 0.62;
+    }
+
+    return 0.38;
+  }
+
+  String _normalize(String value) {
+    final trimmed = value.toLowerCase().replaceAll(RegExp(r'[_:/-]+'), ' ');
+    return trimmed
+        .replaceAll(RegExp(r'[^a-z0-9 ]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  Set<String> _tokenize(String value) {
+    if (value.isEmpty) {
+      return const <String>{};
+    }
+
+    return value.split(' ').where((token) => token.isNotEmpty).toSet();
   }
 }
 
@@ -223,4 +322,16 @@ class _CellRule {
   final String cellName;
   final String description;
   final Set<String> keywords;
+}
+
+class _RuleScore {
+  const _RuleScore({
+    required this.rule,
+    required this.score,
+    required this.matchedKeywords,
+  });
+
+  final _CellRule rule;
+  final double score;
+  final List<String> matchedKeywords;
 }

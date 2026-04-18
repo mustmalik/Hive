@@ -1,5 +1,9 @@
 import 'dart:async';
 
+import '../../application/models/classification_outcome.dart';
+import '../../application/repositories/classification_repository.dart';
+import '../../application/repositories/folder_cell_repository.dart';
+import '../../application/repositories/media_asset_repository.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/classification_service.dart';
 import '../../application/services/folder_mapping_service.dart';
@@ -9,9 +13,13 @@ import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/folder_cell.dart';
 import '../../domain/entities/media_asset.dart';
 import '../../domain/entities/scan_run.dart';
-import '../repositories/in_memory_scan_run_repository.dart';
+import '../repositories/local_classification_repository.dart';
+import '../repositories/local_folder_cell_repository.dart';
+import '../repositories/local_media_asset_repository.dart';
+import '../repositories/local_scan_run_repository.dart';
 import 'ios_vision_classification_service.dart';
 import 'keyword_folder_mapping_service.dart';
+import 'local_scan_result_store.dart';
 import 'photo_manager_media_library_service.dart';
 
 class RealScanCoordinator implements ScanCoordinator {
@@ -19,12 +27,18 @@ class RealScanCoordinator implements ScanCoordinator {
     required MediaLibraryService mediaLibraryService,
     required ClassificationService classificationService,
     required FolderMappingService folderMappingService,
+    required ClassificationRepository classificationRepository,
+    required MediaAssetRepository mediaAssetRepository,
+    required FolderCellRepository folderCellRepository,
     required ScanRunRepository scanRunRepository,
     int pageSize = 24,
     DateTime Function()? now,
   }) : _mediaLibraryService = mediaLibraryService,
        _classificationService = classificationService,
        _folderMappingService = folderMappingService,
+       _classificationRepository = classificationRepository,
+       _mediaAssetRepository = mediaAssetRepository,
+       _folderCellRepository = folderCellRepository,
        _scanRunRepository = scanRunRepository,
        _pageSize = pageSize,
        _now = now ?? DateTime.now;
@@ -32,6 +46,9 @@ class RealScanCoordinator implements ScanCoordinator {
   final MediaLibraryService _mediaLibraryService;
   final ClassificationService _classificationService;
   final FolderMappingService _folderMappingService;
+  final ClassificationRepository _classificationRepository;
+  final MediaAssetRepository _mediaAssetRepository;
+  final FolderCellRepository _folderCellRepository;
   final ScanRunRepository _scanRunRepository;
   final int _pageSize;
   final DateTime Function() _now;
@@ -43,11 +60,16 @@ class RealScanCoordinator implements ScanCoordinator {
   bool _cancelRequested = false;
 
   factory RealScanCoordinator.seeded() {
+    final store = LocalScanResultStore();
+
     return RealScanCoordinator(
       mediaLibraryService: const PhotoManagerMediaLibraryService(),
       classificationService: IosVisionClassificationService(),
       folderMappingService: KeywordFolderMappingService(),
-      scanRunRepository: InMemoryScanRunRepository.seeded(),
+      classificationRepository: LocalClassificationRepository(store: store),
+      mediaAssetRepository: LocalMediaAssetRepository(store: store),
+      folderCellRepository: LocalFolderCellRepository(store: store),
+      scanRunRepository: LocalScanRunRepository(store: store),
     );
   }
 
@@ -101,6 +123,7 @@ class RealScanCoordinator implements ScanCoordinator {
   Future<void> _performScan(ScanRun startingRun) async {
     final processedAssets = <MediaAsset>[];
     final labelsByAssetId = <String, List<ClassificationLabel>>{};
+    final outcomesByAssetId = <String, ClassificationOutcome>{};
     var processedCount = 0;
     var page = 0;
     var latestDetectedCellName = startingRun.latestDetectedCellName;
@@ -128,10 +151,10 @@ class RealScanCoordinator implements ScanCoordinator {
             ordinal: processedCount + 1,
           );
 
-          final labels = await _classifySafely(asset);
-          if (labels.isNotEmpty) {
-            labelsByAssetId[asset.id] = labels;
-          }
+          final outcome = await _classifySafely(asset);
+          final labels = outcome.labels;
+          labelsByAssetId[asset.id] = labels;
+          outcomesByAssetId[asset.id] = outcome;
 
           final cells = await _folderMappingService.buildSuggestedCells(
             assets: processedAssets,
@@ -200,6 +223,12 @@ class RealScanCoordinator implements ScanCoordinator {
         labelsByAssetId: labelsByAssetId,
       );
 
+      await _persistResults(
+        assets: processedAssets,
+        cells: finalCells,
+        outcomesByAssetId: outcomesByAssetId,
+      );
+
       await _emitRun(
         ScanRun(
           id: startingRun.id,
@@ -237,15 +266,51 @@ class RealScanCoordinator implements ScanCoordinator {
     }
   }
 
-  Future<List<ClassificationLabel>> _classifySafely(MediaAsset asset) async {
+  Future<void> _persistResults({
+    required List<MediaAsset> assets,
+    required List<FolderCell> cells,
+    required Map<String, ClassificationOutcome> outcomesByAssetId,
+  }) async {
+    await _classificationRepository.clear();
+    for (final outcome in outcomesByAssetId.values) {
+      await _classificationRepository.saveOutcome(outcome);
+    }
+    await _mediaAssetRepository.clear();
+    await _mediaAssetRepository.upsertAssets(assets);
+    await _folderCellRepository.clear();
+    await _folderCellRepository.saveCells(cells);
+  }
+
+  Future<ClassificationOutcome> _classifySafely(MediaAsset asset) async {
     if (!_isClassifiable(asset)) {
-      return const [];
+      return ClassificationOutcome(
+        assetId: asset.id,
+        status: ClassificationOutcomeStatus.unsupportedAsset,
+        labels: const [],
+        failureReason:
+            'This asset type is not currently classifiable on device.',
+        failureStage: 'load_image_data',
+        failureCode: 'unsupported_asset_type',
+        classificationRan: false,
+        imagePreparationSucceeded: false,
+        noLabelsReturned: false,
+      );
     }
 
     try {
-      return await _classificationService.classifyAsset(asset);
+      return await _classificationService.classifyAssetDetailed(asset);
     } catch (_) {
-      return const [];
+      return ClassificationOutcome(
+        assetId: asset.id,
+        status: ClassificationOutcomeStatus.requestFailed,
+        labels: const [],
+        failureReason: 'The on-device classifier could not finish this asset.',
+        failureStage: 'vision_execution',
+        failureCode: 'scan_coordinator_classification_error',
+        classificationRan: false,
+        imagePreparationSucceeded: false,
+        noLabelsReturned: false,
+      );
     }
   }
 

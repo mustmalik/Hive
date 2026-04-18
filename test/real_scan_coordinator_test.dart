@@ -1,6 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter_v1/data/repositories/in_memory_classification_repository.dart';
+import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
+import 'package:hive_flutter_v1/data/repositories/in_memory_folder_cell_repository.dart';
+import 'package:hive_flutter_v1/data/repositories/in_memory_media_asset_repository.dart';
 import 'package:hive_flutter_v1/application/services/classification_service.dart';
 import 'package:hive_flutter_v1/application/services/media_library_service.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_scan_run_repository.dart';
@@ -20,6 +24,11 @@ void main() {
         folderMappingService: KeywordFolderMappingService(
           now: () => DateTime(2026, 4, 18),
         ),
+        classificationRepository: InMemoryClassificationRepository(),
+        mediaAssetRepository: InMemoryMediaAssetRepository(
+          seedAssets: const [],
+        ),
+        folderCellRepository: InMemoryFolderCellRepository(seedCells: const []),
         scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
         pageSize: 2,
         now: () => DateTime(2026, 4, 18, 12),
@@ -134,7 +143,7 @@ class _FakeMediaLibraryService implements MediaLibraryService {
   Future<int> getEstimatedAssetCount() async => _assets.length;
 }
 
-class _FakeClassificationService implements ClassificationService {
+class _FakeClassificationService extends ClassificationService {
   static final Map<String, List<ClassificationLabel>> _labelsByAssetId = {
     'asset_1': [
       ClassificationLabel(
@@ -161,14 +170,18 @@ class _FakeClassificationService implements ClassificationService {
   };
 
   @override
-  Future<List<ClassificationLabel>> classifyAsset(MediaAsset asset) async {
-    return _labelsByAssetId[asset.id] ?? const [];
-  }
-
-  @override
-  Future<Map<String, List<ClassificationLabel>>> classifyAssets(
-    List<MediaAsset> assets,
-  ) async {
-    return {for (final asset in assets) asset.id: await classifyAsset(asset)};
+  Future<ClassificationOutcome> classifyAssetDetailed(MediaAsset asset) async {
+    final labels = _labelsByAssetId[asset.id] ?? const [];
+    return ClassificationOutcome(
+      assetId: asset.id,
+      status: labels.isEmpty
+          ? ClassificationOutcomeStatus.noLabelsReturned
+          : ClassificationOutcomeStatus.succeeded,
+      labels: labels,
+      classificationRan: true,
+      imagePreparationSucceeded: true,
+      noLabelsReturned: labels.isEmpty,
+      modelIdentifier: labels.isEmpty ? null : labels.first.modelIdentifier,
+    );
   }
 }

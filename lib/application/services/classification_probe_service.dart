@@ -4,4 +4,6 @@ abstract interface class ClassificationProbeService {
   Future<ClassificationProbeResult?> classifyFirstAvailableAsset({
     int pageSize = 40,
   });
+
+  Future<ClassificationProbeResult?> classifyAssetById(String assetId);
 }

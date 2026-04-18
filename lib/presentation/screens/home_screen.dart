@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../../application/services/folder_detail_service.dart';
 import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
 import '../../application/services/scan_coordinator.dart';
-import '../../data/services/in_memory_home_dashboard_service.dart';
+import '../../application/services/thumbnail_service.dart';
+import '../../data/services/persisted_folder_detail_service.dart';
+import '../../data/services/persisted_home_dashboard_service.dart';
+import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../data/services/real_scan_coordinator.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_cell_card.dart';
@@ -16,10 +20,14 @@ class HomeScreen extends StatefulWidget {
     super.key,
     this.homeDashboardService,
     this.createScanCoordinator,
+    this.createFolderDetailService,
+    this.createThumbnailService,
   });
 
   final HomeDashboardService? homeDashboardService;
   final ScanCoordinator Function()? createScanCoordinator;
+  final FolderDetailService Function()? createFolderDetailService;
+  final ThumbnailService Function()? createThumbnailService;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -27,14 +35,58 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late final HomeDashboardService _homeDashboardService;
-  late final Future<HomeDashboardSnapshot> _dashboardFuture;
+  late Future<HomeDashboardSnapshot> _dashboardFuture;
 
   @override
   void initState() {
     super.initState();
     _homeDashboardService =
-        widget.homeDashboardService ?? InMemoryHomeDashboardService.seeded();
+        widget.homeDashboardService ?? PersistedHomeDashboardService.standard();
+    _reloadDashboard();
+  }
+
+  void _reloadDashboard() {
     _dashboardFuture = _homeDashboardService.loadDashboard();
+  }
+
+  Future<void> _openScanProgress() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ScanProgressScreen(
+          scanCoordinator:
+              widget.createScanCoordinator?.call() ??
+              RealScanCoordinator.seeded(),
+        ),
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _reloadDashboard();
+    });
+  }
+
+  Future<void> _openFolderDetail(
+    HomeDashboardSnapshot dashboard,
+    int index,
+  ) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => FolderDetailScreen(
+          cellId: dashboard.visibleCells[index].id,
+          cellName: dashboard.visibleCells[index].name,
+          folderDetailService:
+              widget.createFolderDetailService?.call() ??
+              PersistedFolderDetailService.standard(),
+          thumbnailService:
+              widget.createThumbnailService?.call() ??
+              const PhotoManagerThumbnailService(),
+        ),
+      ),
+    );
   }
 
   @override
@@ -172,18 +224,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               Expanded(
                                 child: ElevatedButton.icon(
-                                  onPressed: () {
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute<void>(
-                                        builder: (_) => ScanProgressScreen(
-                                          scanCoordinator:
-                                              widget.createScanCoordinator
-                                                  ?.call() ??
-                                              RealScanCoordinator.seeded(),
-                                        ),
-                                      ),
-                                    );
-                                  },
+                                  onPressed: _openScanProgress,
                                   icon: const Icon(Icons.hive_outlined),
                                   label: const Text('Start Scan'),
                                 ),
@@ -300,17 +341,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                       featured: dashboard
                                           .visibleCells[index]
                                           .featured,
-                                      onTap: () {
-                                        Navigator.of(context).push(
-                                          MaterialPageRoute<void>(
-                                            builder: (_) => FolderDetailScreen(
-                                              cellName: dashboard
-                                                  .visibleCells[index]
-                                                  .name,
-                                            ),
-                                          ),
-                                        );
-                                      },
+                                      onTap: () =>
+                                          _openFolderDetail(dashboard, index),
                                     ),
                                   ),
                                 ),

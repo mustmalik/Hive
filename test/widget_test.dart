@@ -1,13 +1,22 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:hive_flutter_v1/application/models/home_cell_preview.dart';
 import 'package:hive_flutter_v1/application/models/home_dashboard_snapshot.dart';
+import 'package:hive_flutter_v1/application/models/asset_mapping_explanation.dart';
+import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
+import 'package:hive_flutter_v1/application/models/folder_detail_snapshot.dart';
+import 'package:hive_flutter_v1/application/models/folder_detail_item.dart';
+import 'package:hive_flutter_v1/application/services/folder_detail_service.dart';
 import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
 import 'package:hive_flutter_v1/application/services/permission_service.dart';
 import 'package:hive_flutter_v1/application/services/scan_coordinator.dart';
+import 'package:hive_flutter_v1/application/services/thumbnail_service.dart';
+import 'package:hive_flutter_v1/domain/entities/classification_label.dart';
+import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
 import 'package:hive_flutter_v1/domain/entities/scan_run.dart';
 import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
@@ -65,7 +74,11 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.darkTheme,
-        home: HomeScreen(homeDashboardService: _FakeHomeDashboardService()),
+        home: HomeScreen(
+          homeDashboardService: _FakeHomeDashboardService(),
+          createFolderDetailService: _FakeFolderDetailService.new,
+          createThumbnailService: _FakeThumbnailService.new,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -78,7 +91,16 @@ void main() {
 
     expect(find.text('Virtual cell details, member photos'), findsNothing);
     expect(find.text('Pets'), findsWidgets);
-    expect(find.textContaining('Pets is a virtual HIVE cell.'), findsOneWidget);
+    expect(find.textContaining('Real scan-backed assets'), findsWidgets);
+    expect(find.text('IMG_0001.HEIC'), findsOneWidget);
+
+    await tester.tap(find.text('IMG_0001.HEIC'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Placement Detail'), findsOneWidget);
+    expect(find.text('Mapped Category'), findsOneWidget);
+    expect(find.text('Classification Status'), findsOneWidget);
+    expect(find.text('dog'), findsWidgets);
   });
 
   testWidgets('HomeScreen start scan opens scan progress', (
@@ -193,4 +215,75 @@ class _FakeScanCoordinator implements ScanCoordinator {
 
   @override
   Stream<ScanRun> watchActiveRun() => _controller.stream;
+}
+
+class _FakeFolderDetailService implements FolderDetailService {
+  @override
+  Future<FolderDetailSnapshot?> loadCell(String cellId) async {
+    final labels = [
+      ClassificationLabel(
+        id: 'dog',
+        key: 'dog',
+        displayName: 'dog',
+        confidence: 0.91,
+        source: ClassificationLabelSource.onDeviceModel,
+        createdAt: DateTime(2026, 4, 18),
+        modelIdentifier: 'test',
+      ),
+    ];
+
+    return FolderDetailSnapshot(
+      cellId: cellId,
+      cellName: 'Pets',
+      description: 'Real scan-backed assets grouped into this HIVE cell.',
+      totalCount: 1,
+      items: [
+        FolderDetailItem(
+          asset: MediaAsset(
+            id: 'asset_1',
+            type: MediaAssetType.image,
+            createdAt: DateTime(2026, 4, 18),
+            modifiedAt: DateTime(2026, 4, 18),
+            width: 1200,
+            height: 1600,
+            originalFilename: 'IMG_0001.HEIC',
+          ),
+          title: 'IMG_0001.HEIC',
+          subtitle: 'Photo • 2026-04-18',
+          mappingExplanation: AssetMappingExplanation(
+            cellId: 'pets',
+            cellName: 'Pets',
+            score: 0.91,
+            usedFallback: false,
+            topLabels: labels,
+            matchedKeywords: const ['dog', 'animal'],
+          ),
+          classificationOutcome: ClassificationOutcome(
+            assetId: 'asset_1',
+            status: ClassificationOutcomeStatus.succeeded,
+            labels: labels,
+            classificationRan: true,
+            imagePreparationSucceeded: true,
+            noLabelsReturned: false,
+            modelIdentifier: 'test',
+            sourceFormat: 'public.heic',
+            preparedFormat: 'normalized_cgimage',
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FakeThumbnailService implements ThumbnailService {
+  @override
+  Future<void> clearCache() async {}
+
+  @override
+  Future<Uint8List?> loadThumbnail({
+    required MediaAsset asset,
+    int size = 256,
+  }) async {
+    return null;
+  }
 }

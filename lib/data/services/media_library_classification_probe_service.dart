@@ -26,11 +26,30 @@ class MediaLibraryClassificationProbeService
         continue;
       }
 
-      final labels = await _classificationService.classifyAsset(asset);
-      return ClassificationProbeResult(asset: asset, labels: labels);
+      final outcome = await _classificationService.classifyAssetDetailed(asset);
+      return ClassificationProbeResult(
+        asset: asset,
+        labels: outcome.labels,
+        outcome: outcome,
+      );
     }
 
     return null;
+  }
+
+  @override
+  Future<ClassificationProbeResult?> classifyAssetById(String assetId) async {
+    final asset = await _mediaLibraryService.getAssetById(assetId);
+    if (asset == null || !_isClassifiable(asset)) {
+      return null;
+    }
+
+    final outcome = await _classificationService.classifyAssetDetailed(asset);
+    return ClassificationProbeResult(
+      asset: asset,
+      labels: outcome.labels,
+      outcome: outcome,
+    );
   }
 
   bool _isClassifiable(MediaAsset asset) {
