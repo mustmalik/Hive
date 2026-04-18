@@ -4,7 +4,7 @@ import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../data/services/in_memory_home_dashboard_service.dart';
-import '../../data/services/simulated_scan_coordinator.dart';
+import '../../data/services/real_scan_coordinator.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_cell_card.dart';
 import '../widgets/hive_shell_background.dart';
@@ -179,7 +179,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                           scanCoordinator:
                                               widget.createScanCoordinator
                                                   ?.call() ??
-                                              SimulatedScanCoordinator.seeded(),
+                                              RealScanCoordinator.seeded(),
                                         ),
                                       ),
                                     );

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../application/services/scan_coordinator.dart';
 import '../../domain/entities/scan_run.dart';
-import '../../data/services/simulated_scan_coordinator.dart';
+import '../../data/services/real_scan_coordinator.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 
@@ -25,8 +25,7 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
   @override
   void initState() {
     super.initState();
-    _scanCoordinator =
-        widget.scanCoordinator ?? SimulatedScanCoordinator.seeded();
+    _scanCoordinator = widget.scanCoordinator ?? RealScanCoordinator.seeded();
     _subscription = _scanCoordinator.watchActiveRun().listen((run) {
       if (!mounted) {
         return;
@@ -85,7 +84,7 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
           backgroundColor: HiveColors.surfaceElevated,
           title: const Text('Leave scan?'),
           content: const Text(
-            'This scan shell is simulated for now. Leaving will stop the current run.',
+            'Leaving will stop the current scan before HIVE finishes shaping your cells.',
           ),
           actions: [
             TextButton(
