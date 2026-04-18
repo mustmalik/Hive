@@ -13,6 +13,7 @@ class ClassificationLabel {
     required this.confidence,
     required this.source,
     required this.createdAt,
+    this.modelIdentifier,
   });
 
   final String id;
@@ -21,6 +22,7 @@ class ClassificationLabel {
   final double confidence;
   final ClassificationLabelSource source;
   final DateTime createdAt;
+  final String? modelIdentifier;
 
   bool get isHighConfidence => confidence >= 0.8;
 }
