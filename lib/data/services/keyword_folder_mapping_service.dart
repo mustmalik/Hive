@@ -9,6 +9,126 @@ class KeywordFolderMappingService implements FolderMappingService {
   KeywordFolderMappingService({DateTime Function()? now})
     : _now = now ?? DateTime.now;
 
+  static const Set<String> _familyCueKeywords = {
+    'family',
+    'parent',
+    'parents',
+    'mother',
+    'father',
+    'mom',
+    'dad',
+    'baby',
+    'infant',
+    'toddler',
+    'child',
+    'children',
+    'siblings',
+    'brother',
+    'sister',
+    'wedding',
+    'bride',
+    'groom',
+    'couple',
+    'husband',
+    'wife',
+    'spouse',
+    'newborn',
+    'son',
+    'daughter',
+    'grandmother',
+    'grandfather',
+    'grandma',
+    'grandpa',
+    'relative',
+    'reunion',
+  };
+
+  static const Set<String> _peopleCueKeywords = {
+    'person',
+    'people',
+    'human',
+    'human being',
+    'portrait',
+    'selfie',
+    'face',
+    'head',
+    'facial expression',
+    'smile',
+    'man',
+    'woman',
+    'boy',
+    'girl',
+    'crowd',
+    'group',
+    'adult',
+    'teen',
+    'teenager',
+    'friend',
+    'friends',
+  };
+
+  static const Set<String> _screenshotFilenameKeywords = {
+    'screenshot',
+    'screen shot',
+    'screen capture',
+    'screen_recording',
+    'screen recording',
+  };
+
+  static const Set<String> _screenshotCueKeywords = {
+    'screenshot',
+    'screen',
+    'screen capture',
+    'user interface',
+    'interface',
+    'software',
+    'web page',
+    'website',
+    'application',
+    'app',
+    'text message',
+    'message',
+    'notification',
+    'menu',
+    'chat',
+    'social media',
+    'display',
+  };
+
+  static const Set<String> _animationCueKeywords = {
+    'cartoon',
+    'animation',
+    'anime',
+    'animated cartoon',
+    'illustration',
+    'drawing',
+    'graphic design',
+    'comic',
+    'meme',
+    'sticker',
+    'mascot',
+    'clip art',
+    'fictional character',
+    'character',
+    'digital art',
+    'artwork',
+    'sketch',
+    'doodle',
+    'avatar',
+    'pixel art',
+  };
+
+  static const Set<String> _animationFilenameKeywords = {
+    'meme',
+    'sticker',
+    'anime',
+    'cartoon',
+    'comic',
+    'reaction',
+    'avatar',
+    'gif',
+  };
+
   static const List<_CellRule> _rules = [
     _CellRule(
       cellId: 'family',
@@ -36,8 +156,20 @@ class KeywordFolderMappingService implements FolderMappingService {
         'bride',
         'groom',
         'couple',
+        'husband',
+        'wife',
+        'spouse',
+        'newborn',
+        'son',
+        'daughter',
+        'grandmother',
+        'grandfather',
+        'grandma',
+        'grandpa',
+        'relative',
+        'reunion',
       },
-      priorityBias: 0.18,
+      priorityBias: 0.14,
     ),
     _CellRule(
       cellId: 'people',
@@ -61,8 +193,14 @@ class KeywordFolderMappingService implements FolderMappingService {
         'boy',
         'girl',
         'crowd',
+        'group',
+        'adult',
+        'teen',
+        'teenager',
+        'friend',
+        'friends',
       },
-      priorityBias: 0.12,
+      priorityBias: 0.16,
     ),
     _CellRule(
       cellId: 'pets',
@@ -152,11 +290,19 @@ class KeywordFolderMappingService implements FolderMappingService {
       keywords: {
         'screenshot',
         'screen',
+        'screen capture',
         'user interface',
+        'interface',
         'software',
         'web page',
         'application',
+        'app',
         'text message',
+        'message',
+        'notification',
+        'menu',
+        'chat',
+        'social media',
         'website',
         'display',
       },
@@ -245,6 +391,7 @@ class KeywordFolderMappingService implements FolderMappingService {
         'cartoon',
         'animation',
         'anime',
+        'animated cartoon',
         'illustration',
         'drawing',
         'graphic design',
@@ -253,6 +400,14 @@ class KeywordFolderMappingService implements FolderMappingService {
         'sticker',
         'mascot',
         'clip art',
+        'fictional character',
+        'character',
+        'digital art',
+        'artwork',
+        'sketch',
+        'doodle',
+        'avatar',
+        'pixel art',
       },
       priorityBias: 0.16,
     ),
@@ -374,7 +529,9 @@ class KeywordFolderMappingService implements FolderMappingService {
       cellName: rule.cellName,
       score: 1.5,
       usedFallback: false,
-      topLabels: sortedLabels.take(_maxExplanationLabels).toList(growable: false),
+      topLabels: sortedLabels
+          .take(_maxExplanationLabels)
+          .toList(growable: false),
       matchedKeywords: const ['manual override'],
       isManualOverride: true,
     );
@@ -449,6 +606,8 @@ class KeywordFolderMappingService implements FolderMappingService {
   }) {
     var score = rule.priorityBias;
     final matchedKeywords = <String>{};
+    final normalizedFilename = _normalize(asset.originalFilename ?? '');
+    final filenameTokens = _tokenize(normalizedFilename);
 
     if (rule.assetTypes.contains(asset.type)) {
       score += 0.9;
@@ -477,6 +636,15 @@ class KeywordFolderMappingService implements FolderMappingService {
       }
     }
 
+    score += _applyRuleSpecificBoosts(
+      rule: rule,
+      asset: asset,
+      labels: labels,
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      matchedKeywords: matchedKeywords,
+    );
+
     return _RuleScore(
       rule: rule,
       score: score,
@@ -498,8 +666,14 @@ class KeywordFolderMappingService implements FolderMappingService {
       return 1.0;
     }
 
-    if (normalized.contains(normalizedKeyword) ||
-        normalizedKeyword.contains(normalized)) {
+    final allowSubstringMatch =
+        normalized.contains(' ') ||
+        normalizedKeyword.contains(' ') ||
+        (normalized.length >= 7 && normalizedKeyword.length >= 7);
+
+    if (allowSubstringMatch &&
+        (normalized.contains(normalizedKeyword) ||
+            normalizedKeyword.contains(normalized))) {
       return 0.96;
     }
 
@@ -523,6 +697,261 @@ class KeywordFolderMappingService implements FolderMappingService {
     }
 
     return 0.38;
+  }
+
+  double _applyRuleSpecificBoosts({
+    required _CellRule rule,
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> matchedKeywords,
+  }) {
+    final cueSummary = _summarizeSignals(labels);
+
+    return switch (rule.cellId) {
+      'family' => _familyBoost(
+        cueSummary: cueSummary,
+        normalizedFilename: normalizedFilename,
+        matchedKeywords: matchedKeywords,
+      ),
+      'people' => _peopleBoost(
+        cueSummary: cueSummary,
+        matchedKeywords: matchedKeywords,
+      ),
+      'screenshots' => _screenshotBoost(
+        asset: asset,
+        cueSummary: cueSummary,
+        normalizedFilename: normalizedFilename,
+        filenameTokens: filenameTokens,
+        matchedKeywords: matchedKeywords,
+      ),
+      'animation_cartoon_meme' => _animationBoost(
+        cueSummary: cueSummary,
+        normalizedFilename: normalizedFilename,
+        filenameTokens: filenameTokens,
+        matchedKeywords: matchedKeywords,
+      ),
+      _ => 0,
+    };
+  }
+
+  double _familyBoost({
+    required _CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.familyCueCount > 0) {
+      bonus += 0.18;
+      matchedKeywords.add('family cue');
+    }
+
+    if (cueSummary.familyCueCount > 0 && cueSummary.peopleCueCount > 0) {
+      bonus += 0.34;
+      matchedKeywords.add('shared family moment');
+    }
+
+    if (normalizedFilename.contains('family')) {
+      bonus += 0.45;
+      matchedKeywords.add('filename family');
+    }
+
+    return bonus;
+  }
+
+  double _peopleBoost({
+    required _CueSummary cueSummary,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.peopleCueCount > 0) {
+      bonus += 0.18;
+      matchedKeywords.add('people cue');
+    }
+
+    if (cueSummary.peopleCueCount > 0 && cueSummary.familyCueCount == 0) {
+      bonus += 0.24;
+      matchedKeywords.add('general people signal');
+    }
+
+    if (cueSummary.crowdCueCount > 0) {
+      bonus += 0.16;
+      matchedKeywords.add('crowd or group');
+    }
+
+    return bonus;
+  }
+
+  double _screenshotBoost({
+    required MediaAsset asset,
+    required _CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+    var hasScreenshotSignal = false;
+
+    if (asset.type == MediaAssetType.screenshot) {
+      bonus += 0.42;
+      matchedKeywords.add('native screenshot');
+      hasScreenshotSignal = true;
+    }
+
+    if (_matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: _screenshotFilenameKeywords,
+    )) {
+      bonus += 0.72;
+      matchedKeywords.add('filename screenshot');
+      hasScreenshotSignal = true;
+    }
+
+    if (cueSummary.screenshotCueCount > 0) {
+      bonus += 0.18 + (cueSummary.screenshotCueCount * 0.08);
+      matchedKeywords.add('ui signal');
+      hasScreenshotSignal = true;
+    }
+
+    if (hasScreenshotSignal &&
+        asset.width > 0 &&
+        asset.height > 0 &&
+        (asset.width - asset.height).abs() > 180) {
+      bonus += 0.06;
+      matchedKeywords.add('screen aspect');
+    }
+
+    return bonus;
+  }
+
+  double _animationBoost({
+    required _CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+
+    if (_matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: _animationFilenameKeywords,
+    )) {
+      bonus += 0.55;
+      matchedKeywords.add('filename stylized');
+    }
+
+    if (cueSummary.animationCueCount > 0) {
+      bonus += 0.24 + (cueSummary.animationCueCount * 0.09);
+      matchedKeywords.add('stylized cue');
+    }
+
+    if (cueSummary.animationCueCount >= 2) {
+      bonus += 0.2;
+      matchedKeywords.add('strong stylized cluster');
+    }
+
+    return bonus;
+  }
+
+  _CueSummary _summarizeSignals(List<ClassificationLabel> labels) {
+    var familyCueCount = 0;
+    var peopleCueCount = 0;
+    var screenshotCueCount = 0;
+    var animationCueCount = 0;
+    var crowdCueCount = 0;
+
+    for (final label in labels) {
+      final normalized = _normalize(label.displayName);
+      final tokens = _tokenize(normalized);
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _familyCueKeywords,
+      )) {
+        familyCueCount += 1;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _peopleCueKeywords,
+      )) {
+        peopleCueCount += 1;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _screenshotCueKeywords,
+      )) {
+        screenshotCueCount += 1;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _animationCueKeywords,
+      )) {
+        animationCueCount += 1;
+      }
+
+      if (tokens.contains('crowd') ||
+          tokens.contains('group') ||
+          normalized.contains('group photo')) {
+        crowdCueCount += 1;
+      }
+    }
+
+    return _CueSummary(
+      familyCueCount: familyCueCount,
+      peopleCueCount: peopleCueCount,
+      screenshotCueCount: screenshotCueCount,
+      animationCueCount: animationCueCount,
+      crowdCueCount: crowdCueCount,
+    );
+  }
+
+  bool _matchesCueSet({
+    required String normalized,
+    required Set<String> tokens,
+    required Set<String> cues,
+  }) {
+    for (final cue in cues) {
+      if (_keywordMatch(keyword: cue, tokens: tokens, normalized: normalized) >
+          0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _matchesFilenameCue({
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> cues,
+  }) {
+    if (normalizedFilename.isEmpty) {
+      return false;
+    }
+
+    for (final cue in cues) {
+      if (_keywordMatch(
+            keyword: cue,
+            tokens: filenameTokens,
+            normalized: normalizedFilename,
+          ) >
+          0) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   String _normalize(String value) {
@@ -574,4 +1003,20 @@ class _RuleScore {
   final _CellRule rule;
   final double score;
   final List<String> matchedKeywords;
+}
+
+class _CueSummary {
+  const _CueSummary({
+    required this.familyCueCount,
+    required this.peopleCueCount,
+    required this.screenshotCueCount,
+    required this.animationCueCount,
+    required this.crowdCueCount,
+  });
+
+  final int familyCueCount;
+  final int peopleCueCount;
+  final int screenshotCueCount;
+  final int animationCueCount;
+  final int crowdCueCount;
 }
