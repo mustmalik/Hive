@@ -5,11 +5,13 @@ import '../../application/models/scan_scope.dart';
 import '../../application/services/folder_detail_service.dart';
 import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
+import '../../application/services/manual_recategorization_service.dart';
 import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../application/services/thumbnail_service.dart';
 import '../../data/services/persisted_folder_detail_service.dart';
 import '../../data/services/persisted_home_dashboard_service.dart';
+import '../../data/services/persisted_manual_recategorization_service.dart';
 import '../../data/services/photo_manager_media_library_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../data/services/real_scan_coordinator.dart';
@@ -26,6 +28,7 @@ class HomeScreen extends StatefulWidget {
     this.mediaLibraryService,
     this.createScanCoordinator,
     this.createFolderDetailService,
+    this.createManualRecategorizationService,
     this.createThumbnailService,
   });
 
@@ -33,6 +36,8 @@ class HomeScreen extends StatefulWidget {
   final MediaLibraryService? mediaLibraryService;
   final ScanCoordinator Function()? createScanCoordinator;
   final FolderDetailService Function()? createFolderDetailService;
+  final ManualRecategorizationService Function()?
+  createManualRecategorizationService;
   final ThumbnailService Function()? createThumbnailService;
 
   @override
@@ -111,12 +116,23 @@ class _HomeScreenState extends State<HomeScreen> {
           folderDetailService:
               widget.createFolderDetailService?.call() ??
               PersistedFolderDetailService.standard(),
+          manualRecategorizationService:
+              widget.createManualRecategorizationService?.call() ??
+              PersistedManualRecategorizationService.standard(),
           thumbnailService:
               widget.createThumbnailService?.call() ??
               const PhotoManagerThumbnailService(),
         ),
       ),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _reloadDashboard();
+    });
   }
 
   @override

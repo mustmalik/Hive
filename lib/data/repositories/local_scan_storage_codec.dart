@@ -1,6 +1,7 @@
 import '../../application/models/classification_outcome.dart';
 import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/folder_cell.dart';
+import '../../domain/entities/manual_override.dart';
 import '../../domain/entities/media_asset.dart';
 import '../../domain/entities/scan_run.dart';
 import '../services/local_scan_result_store.dart';
@@ -10,12 +11,14 @@ StoredScanSnapshot copyStoredScanSnapshot(
   List<Map<String, dynamic>>? cells,
   List<Map<String, dynamic>>? assets,
   List<Map<String, dynamic>>? classifications,
+  List<Map<String, dynamic>>? overrides,
   List<Map<String, dynamic>>? runs,
 }) {
   return StoredScanSnapshot(
     cells: cells ?? snapshot.cells,
     assets: assets ?? snapshot.assets,
     classifications: classifications ?? snapshot.classifications,
+    overrides: overrides ?? snapshot.overrides,
     runs: runs ?? snapshot.runs,
   );
 }
@@ -255,5 +258,33 @@ ClassificationLabel classificationLabelFromJson(Map<String, dynamic> json) {
         DateTime.tryParse(json['createdAt'] as String? ?? '') ??
         DateTime.fromMillisecondsSinceEpoch(0),
     modelIdentifier: json['modelIdentifier'] as String?,
+  );
+}
+
+Map<String, dynamic> manualOverrideToJson(ManualOverride override) {
+  return {
+    'id': override.id,
+    'assetId': override.assetId,
+    'action': override.action.name,
+    'createdAt': override.createdAt.toIso8601String(),
+    'cellId': override.cellId,
+    'labelId': override.labelId,
+    'note': override.note,
+  };
+}
+
+ManualOverride manualOverrideFromJson(Map<String, dynamic> json) {
+  return ManualOverride(
+    id: json['id'] as String? ?? 'unknown',
+    assetId: json['assetId'] as String? ?? '',
+    action: ManualOverrideAction.values.byName(
+      json['action'] as String? ?? ManualOverrideAction.includeInCell.name,
+    ),
+    createdAt:
+        DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+        DateTime.fromMillisecondsSinceEpoch(0),
+    cellId: json['cellId'] as String?,
+    labelId: json['labelId'] as String?,
+    note: json['note'] as String?,
   );
 }

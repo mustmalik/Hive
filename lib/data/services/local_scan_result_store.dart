@@ -85,6 +85,7 @@ class StoredScanSnapshot {
     this.cells = const <Map<String, dynamic>>[],
     this.assets = const <Map<String, dynamic>>[],
     this.classifications = const <Map<String, dynamic>>[],
+    this.overrides = const <Map<String, dynamic>>[],
     this.runs = const <Map<String, dynamic>>[],
   });
 
@@ -93,6 +94,7 @@ class StoredScanSnapshot {
       cells: _readList(json['cells']),
       assets: _readList(json['assets']),
       classifications: _readList(json['classifications']),
+      overrides: _readList(json['overrides']),
       runs: _readList(json['runs']),
     );
   }
@@ -100,6 +102,7 @@ class StoredScanSnapshot {
   final List<Map<String, dynamic>> cells;
   final List<Map<String, dynamic>> assets;
   final List<Map<String, dynamic>> classifications;
+  final List<Map<String, dynamic>> overrides;
   final List<Map<String, dynamic>> runs;
 
   Map<String, dynamic> toJson() {
@@ -107,6 +110,7 @@ class StoredScanSnapshot {
       'cells': cells,
       'assets': assets,
       'classifications': classifications,
+      'overrides': overrides,
       'runs': runs,
     };
   }

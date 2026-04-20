@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_classification_repository.dart';
+import 'package:hive_flutter_v1/data/repositories/in_memory_manual_override_repository.dart';
 import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
 import 'package:hive_flutter_v1/application/models/media_album.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
@@ -13,6 +14,7 @@ import 'package:hive_flutter_v1/data/repositories/in_memory_scan_run_repository.
 import 'package:hive_flutter_v1/data/services/keyword_folder_mapping_service.dart';
 import 'package:hive_flutter_v1/data/services/real_scan_coordinator.dart';
 import 'package:hive_flutter_v1/domain/entities/classification_label.dart';
+import 'package:hive_flutter_v1/domain/entities/manual_override.dart';
 import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
 import 'package:hive_flutter_v1/domain/entities/scan_run.dart';
 
@@ -20,6 +22,7 @@ void main() {
   test(
     'RealScanCoordinator emits real batched progress and completes',
     () async {
+      final manualOverrideRepository = InMemoryManualOverrideRepository();
       final coordinator = RealScanCoordinator(
         mediaLibraryService: _FakeMediaLibraryService(),
         classificationService: _FakeClassificationService(),
@@ -27,6 +30,7 @@ void main() {
           now: () => DateTime(2026, 4, 18),
         ),
         classificationRepository: InMemoryClassificationRepository(),
+        manualOverrideRepository: manualOverrideRepository,
         mediaAssetRepository: InMemoryMediaAssetRepository(
           seedAssets: const [],
         ),
@@ -79,6 +83,57 @@ void main() {
       );
     },
   );
+
+  test('RealScanCoordinator honors manual overrides on later scans', () async {
+    final folderCellRepository = InMemoryFolderCellRepository(
+      seedCells: const [],
+    );
+    final manualOverrideRepository = InMemoryManualOverrideRepository(
+      seedOverrides: [
+        ManualOverride(
+          id: 'manual_asset_1_people',
+          assetId: 'asset_1',
+          action: ManualOverrideAction.includeInCell,
+          createdAt: DateTime(2026, 4, 18, 9),
+          cellId: 'people',
+          note: 'manual_move',
+        ),
+      ],
+    );
+    final coordinator = RealScanCoordinator(
+      mediaLibraryService: _FakeMediaLibraryService(),
+      classificationService: _FakeClassificationService(),
+      folderMappingService: KeywordFolderMappingService(
+        now: () => DateTime(2026, 4, 18),
+      ),
+      classificationRepository: InMemoryClassificationRepository(),
+      manualOverrideRepository: manualOverrideRepository,
+      mediaAssetRepository: InMemoryMediaAssetRepository(seedAssets: const []),
+      folderCellRepository: folderCellRepository,
+      scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
+      pageSize: 3,
+      now: () => DateTime(2026, 4, 18, 12),
+    );
+
+    final completed = Completer<ScanRun>();
+    final subscription = coordinator.watchActiveRun().listen((run) {
+      if (run.isTerminal && !completed.isCompleted) {
+        completed.complete(run);
+      }
+    });
+    addTearDown(subscription.cancel);
+
+    await coordinator.startFullScan();
+    final run = await completed.future.timeout(const Duration(seconds: 3));
+
+    final peopleCell = await folderCellRepository.getCellById('people');
+    final petsCell = await folderCellRepository.getCellById('pets');
+
+    expect(run.status, ScanRunStatus.completed);
+    expect(peopleCell, isNotNull);
+    expect(peopleCell!.assetIds, contains('asset_1'));
+    expect(petsCell?.assetIds.contains('asset_1') ?? false, isFalse);
+  });
 }
 
 class _FakeMediaLibraryService implements MediaLibraryService {

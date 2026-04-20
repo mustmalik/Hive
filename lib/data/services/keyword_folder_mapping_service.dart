@@ -278,15 +278,23 @@ class KeywordFolderMappingService implements FolderMappingService {
     List<ManualOverride> overrides = const [],
   }) async {
     final now = _now();
+    final includeOverridesByAssetId = _resolveIncludeOverrides(overrides);
     final assetsByCellId = <String, List<String>>{};
     final labelIdsByCellId = <String, Set<String>>{};
     final coverAssetIdByCellId = <String, String>{};
 
     for (final asset in assets) {
-      final explanation = explainPlacement(
-        asset: asset,
-        labels: labelsByAssetId[asset.id] ?? const [],
-      );
+      final override = includeOverridesByAssetId[asset.id];
+      final explanation = override == null
+          ? explainPlacement(
+              asset: asset,
+              labels: labelsByAssetId[asset.id] ?? const [],
+            )
+          : _manualOverrideExplanation(
+              asset: asset,
+              cellId: override.cellId!,
+              labels: labelsByAssetId[asset.id] ?? const [],
+            );
 
       assetsByCellId
           .putIfAbsent(explanation.cellId, () => <String>[])
@@ -330,6 +338,58 @@ class KeywordFolderMappingService implements FolderMappingService {
           ),
         )
         .toList(growable: false);
+  }
+
+  Map<String, ManualOverride> _resolveIncludeOverrides(
+    List<ManualOverride> overrides,
+  ) {
+    final result = <String, ManualOverride>{};
+
+    for (final override in overrides) {
+      if (override.action != ManualOverrideAction.includeInCell ||
+          override.cellId == null) {
+        continue;
+      }
+
+      final existing = result[override.assetId];
+      if (existing == null || override.createdAt.isAfter(existing.createdAt)) {
+        result[override.assetId] = override;
+      }
+    }
+
+    return result;
+  }
+
+  AssetMappingExplanation _manualOverrideExplanation({
+    required MediaAsset asset,
+    required String cellId,
+    required List<ClassificationLabel> labels,
+  }) {
+    final rule = _ruleForCellId(cellId) ?? _unsortedRule;
+    final sortedLabels = List<ClassificationLabel>.from(labels)
+      ..sort((left, right) => right.confidence.compareTo(left.confidence));
+
+    return AssetMappingExplanation(
+      cellId: rule.cellId,
+      cellName: rule.cellName,
+      score: 1.5,
+      usedFallback: false,
+      topLabels: sortedLabels.take(_maxExplanationLabels).toList(growable: false),
+      matchedKeywords: const ['manual override'],
+      isManualOverride: true,
+    );
+  }
+
+  _CellRule? _ruleForCellId(String cellId) {
+    for (final rule in _rules) {
+      if (rule.cellId == cellId) {
+        return rule;
+      }
+    }
+    if (_unsortedRule.cellId == cellId) {
+      return _unsortedRule;
+    }
+    return null;
   }
 
   @override

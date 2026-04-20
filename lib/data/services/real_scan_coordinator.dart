@@ -4,6 +4,7 @@ import '../../application/models/classification_outcome.dart';
 import '../../application/models/scan_scope.dart';
 import '../../application/repositories/classification_repository.dart';
 import '../../application/repositories/folder_cell_repository.dart';
+import '../../application/repositories/manual_override_repository.dart';
 import '../../application/repositories/media_asset_repository.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/classification_service.dart';
@@ -16,6 +17,7 @@ import '../../domain/entities/media_asset.dart';
 import '../../domain/entities/scan_run.dart';
 import '../repositories/local_classification_repository.dart';
 import '../repositories/local_folder_cell_repository.dart';
+import '../repositories/local_manual_override_repository.dart';
 import '../repositories/local_media_asset_repository.dart';
 import '../repositories/local_scan_run_repository.dart';
 import 'ios_vision_classification_service.dart';
@@ -29,6 +31,7 @@ class RealScanCoordinator implements ScanCoordinator {
     required ClassificationService classificationService,
     required FolderMappingService folderMappingService,
     required ClassificationRepository classificationRepository,
+    required ManualOverrideRepository manualOverrideRepository,
     required MediaAssetRepository mediaAssetRepository,
     required FolderCellRepository folderCellRepository,
     required ScanRunRepository scanRunRepository,
@@ -38,6 +41,7 @@ class RealScanCoordinator implements ScanCoordinator {
        _classificationService = classificationService,
        _folderMappingService = folderMappingService,
        _classificationRepository = classificationRepository,
+       _manualOverrideRepository = manualOverrideRepository,
        _mediaAssetRepository = mediaAssetRepository,
        _folderCellRepository = folderCellRepository,
        _scanRunRepository = scanRunRepository,
@@ -48,6 +52,7 @@ class RealScanCoordinator implements ScanCoordinator {
   final ClassificationService _classificationService;
   final FolderMappingService _folderMappingService;
   final ClassificationRepository _classificationRepository;
+  final ManualOverrideRepository _manualOverrideRepository;
   final MediaAssetRepository _mediaAssetRepository;
   final FolderCellRepository _folderCellRepository;
   final ScanRunRepository _scanRunRepository;
@@ -68,6 +73,7 @@ class RealScanCoordinator implements ScanCoordinator {
       classificationService: IosVisionClassificationService(),
       folderMappingService: KeywordFolderMappingService(),
       classificationRepository: LocalClassificationRepository(store: store),
+      manualOverrideRepository: LocalManualOverrideRepository(store: store),
       mediaAssetRepository: LocalMediaAssetRepository(store: store),
       folderCellRepository: LocalFolderCellRepository(store: store),
       scanRunRepository: LocalScanRunRepository(store: store),
@@ -130,6 +136,7 @@ class RealScanCoordinator implements ScanCoordinator {
     final processedAssets = <MediaAsset>[];
     final labelsByAssetId = <String, List<ClassificationLabel>>{};
     final outcomesByAssetId = <String, ClassificationOutcome>{};
+    final manualOverrides = await _manualOverrideRepository.getAllOverrides();
     var processedCount = 0;
     var page = 0;
     var latestDetectedCellName = startingRun.latestDetectedCellName;
@@ -166,6 +173,7 @@ class RealScanCoordinator implements ScanCoordinator {
           final cells = await _folderMappingService.buildSuggestedCells(
             assets: processedAssets,
             labelsByAssetId: labelsByAssetId,
+            overrides: manualOverrides,
           );
 
           processedCount += 1;
@@ -228,6 +236,7 @@ class RealScanCoordinator implements ScanCoordinator {
       final finalCells = await _folderMappingService.buildSuggestedCells(
         assets: processedAssets,
         labelsByAssetId: labelsByAssetId,
+        overrides: manualOverrides,
       );
 
       await _persistResults(

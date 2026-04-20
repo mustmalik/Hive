@@ -10,10 +10,12 @@ import 'package:hive_flutter_v1/application/models/asset_mapping_explanation.dar
 import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_snapshot.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_item.dart';
+import 'package:hive_flutter_v1/application/models/hive_cell_category.dart';
 import 'package:hive_flutter_v1/application/models/media_album.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
 import 'package:hive_flutter_v1/application/services/folder_detail_service.dart';
 import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
+import 'package:hive_flutter_v1/application/services/manual_recategorization_service.dart';
 import 'package:hive_flutter_v1/application/services/media_library_service.dart';
 import 'package:hive_flutter_v1/application/services/permission_service.dart';
 import 'package:hive_flutter_v1/application/services/scan_coordinator.dart';
@@ -23,6 +25,7 @@ import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
 import 'package:hive_flutter_v1/domain/entities/scan_run.dart';
 import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
+import 'package:hive_flutter_v1/presentation/screens/folder_detail_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
 import 'package:hive_flutter_v1/presentation/theme/app_theme.dart';
 
@@ -141,6 +144,60 @@ void main() {
     expect(find.text('Scanning your library'), findsOneWidget);
     expect(find.text('Scope • Summer Roll'), findsOneWidget);
     expect(find.text('3 of 8'), findsOneWidget);
+  });
+
+  testWidgets('FolderDetailScreen can move an asset into another cell', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    var currentCellId = 'pets';
+    final folderDetailService = _MutableFolderDetailService(
+      currentCellId: () => currentCellId,
+    );
+    final manualRecategorizationService = _FakeManualRecategorizationService(
+      onMove: (_, targetCellId) {
+        currentCellId = targetCellId;
+      },
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: FolderDetailScreen(
+          cellId: 'pets',
+          cellName: 'Pets',
+          folderDetailService: folderDetailService,
+          manualRecategorizationService: manualRecategorizationService,
+          thumbnailService: _FakeThumbnailService(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('IMG_0001.HEIC'), findsOneWidget);
+
+    await tester.tap(find.text('IMG_0001.HEIC'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move to Cell'), findsOneWidget);
+
+    await tester.tap(find.text('Move to Cell'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('People'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Moved to People'), findsOneWidget);
+    expect(find.text('No saved members yet'), findsOneWidget);
+    expect(manualRecategorizationService.movedAssetId, 'asset_1');
+    expect(manualRecategorizationService.targetCellId, 'people');
   });
 }
 
@@ -266,58 +323,54 @@ class _FakeMediaLibraryService implements MediaLibraryService {
 class _FakeFolderDetailService implements FolderDetailService {
   @override
   Future<FolderDetailSnapshot?> loadCell(String cellId) async {
-    final labels = [
-      ClassificationLabel(
-        id: 'dog',
-        key: 'dog',
-        displayName: 'dog',
-        confidence: 0.91,
-        source: ClassificationLabelSource.onDeviceModel,
-        createdAt: DateTime(2026, 4, 18),
-        modelIdentifier: 'test',
-      ),
-    ];
+    return _buildFolderDetailSnapshot(cellId: cellId, cellName: 'Pets');
+  }
+}
 
-    return FolderDetailSnapshot(
-      cellId: cellId,
-      cellName: 'Pets',
-      description: 'Real scan-backed assets grouped into this HIVE cell.',
-      totalCount: 1,
-      items: [
-        FolderDetailItem(
-          asset: MediaAsset(
-            id: 'asset_1',
-            type: MediaAssetType.image,
-            createdAt: DateTime(2026, 4, 18),
-            modifiedAt: DateTime(2026, 4, 18),
-            width: 1200,
-            height: 1600,
-            originalFilename: 'IMG_0001.HEIC',
-          ),
-          title: 'IMG_0001.HEIC',
-          subtitle: 'Photo • 2026-04-18',
-          mappingExplanation: AssetMappingExplanation(
-            cellId: 'pets',
-            cellName: 'Pets',
-            score: 0.91,
-            usedFallback: false,
-            topLabels: labels,
-            matchedKeywords: const ['dog', 'animal'],
-          ),
-          classificationOutcome: ClassificationOutcome(
-            assetId: 'asset_1',
-            status: ClassificationOutcomeStatus.succeeded,
-            labels: labels,
-            classificationRan: true,
-            imagePreparationSucceeded: true,
-            noLabelsReturned: false,
-            modelIdentifier: 'test',
-            sourceFormat: 'public.heic',
-            preparedFormat: 'normalized_cgimage',
-          ),
-        ),
-      ],
-    );
+class _MutableFolderDetailService implements FolderDetailService {
+  _MutableFolderDetailService({required this.currentCellId});
+
+  final String Function() currentCellId;
+
+  @override
+  Future<FolderDetailSnapshot?> loadCell(String cellId) async {
+    if (cellId != 'pets') {
+      return null;
+    }
+
+    if (currentCellId() != 'pets') {
+      return const FolderDetailSnapshot(
+        cellId: 'pets',
+        cellName: 'Pets',
+        description: 'Real scan-backed assets grouped into this HIVE cell.',
+        totalCount: 0,
+        items: [],
+      );
+    }
+
+    return _buildFolderDetailSnapshot(cellId: 'pets', cellName: 'Pets');
+  }
+}
+
+class _FakeManualRecategorizationService
+    implements ManualRecategorizationService {
+  _FakeManualRecategorizationService({required this.onMove});
+
+  final void Function(String assetId, String targetCellId) onMove;
+  String? movedAssetId;
+  String? targetCellId;
+
+  @override
+  List<HiveCellCategory> get availableTargetCells => hiveTopLevelCategories;
+
+  @override
+  Future<void> moveAssetToCell({
+    required String assetId,
+    required String targetCellId,
+  }) async {
+    movedAssetId = assetId;
+    this.targetCellId = targetCellId;
+    onMove(assetId, targetCellId);
   }
 }
 
@@ -332,4 +385,62 @@ class _FakeThumbnailService implements ThumbnailService {
   }) async {
     return null;
   }
+}
+
+FolderDetailSnapshot _buildFolderDetailSnapshot({
+  required String cellId,
+  required String cellName,
+}) {
+  final labels = [
+    ClassificationLabel(
+      id: 'dog',
+      key: 'dog',
+      displayName: 'dog',
+      confidence: 0.91,
+      source: ClassificationLabelSource.onDeviceModel,
+      createdAt: DateTime(2026, 4, 18),
+      modelIdentifier: 'test',
+    ),
+  ];
+
+  return FolderDetailSnapshot(
+    cellId: cellId,
+    cellName: cellName,
+    description: 'Real scan-backed assets grouped into this HIVE cell.',
+    totalCount: 1,
+    items: [
+      FolderDetailItem(
+        asset: MediaAsset(
+          id: 'asset_1',
+          type: MediaAssetType.image,
+          createdAt: DateTime(2026, 4, 18),
+          modifiedAt: DateTime(2026, 4, 18),
+          width: 1200,
+          height: 1600,
+          originalFilename: 'IMG_0001.HEIC',
+        ),
+        title: 'IMG_0001.HEIC',
+        subtitle: 'Photo • 2026-04-18',
+        mappingExplanation: AssetMappingExplanation(
+          cellId: cellId,
+          cellName: cellName,
+          score: 0.91,
+          usedFallback: false,
+          topLabels: labels,
+          matchedKeywords: const ['dog', 'animal'],
+        ),
+        classificationOutcome: ClassificationOutcome(
+          assetId: 'asset_1',
+          status: ClassificationOutcomeStatus.succeeded,
+          labels: labels,
+          classificationRan: true,
+          imagePreparationSucceeded: true,
+          noLabelsReturned: false,
+          modelIdentifier: 'test',
+          sourceFormat: 'public.heic',
+          preparedFormat: 'normalized_cgimage',
+        ),
+      ),
+    ],
+  );
 }

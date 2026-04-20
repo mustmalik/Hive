@@ -8,6 +8,7 @@ class AssetMappingExplanation {
     required this.usedFallback,
     required this.topLabels,
     this.matchedKeywords = const [],
+    this.isManualOverride = false,
   });
 
   final String cellId;
@@ -16,4 +17,5 @@ class AssetMappingExplanation {
   final bool usedFallback;
   final List<ClassificationLabel> topLabels;
   final List<String> matchedKeywords;
+  final bool isManualOverride;
 }
