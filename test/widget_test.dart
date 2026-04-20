@@ -103,6 +103,15 @@ void main() {
     await tester.tap(find.text('IMG_0001.HEIC'));
     await tester.pumpAndSettle();
 
+    expect(find.text('Asset Detail'), findsOneWidget);
+    expect(find.text('Move to Cell'), findsOneWidget);
+    expect(find.text('Why This Landed Here'), findsOneWidget);
+
+    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, -260));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Why This Landed Here'));
+    await tester.pumpAndSettle();
+
     expect(find.text('Placement Detail'), findsOneWidget);
     expect(find.text('Mapped Category'), findsOneWidget);
     expect(find.text('Classification Status'), findsOneWidget);
@@ -185,8 +194,11 @@ void main() {
     await tester.tap(find.text('IMG_0001.HEIC'));
     await tester.pumpAndSettle();
 
+    expect(find.text('Asset Detail'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
 
+    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, -260));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Move to Cell'));
     await tester.pumpAndSettle();
 
@@ -195,6 +207,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Moved to People'), findsOneWidget);
+    expect(find.text('Manual placement'), findsOneWidget);
+
+    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, 320));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.chevron_left_rounded));
+    await tester.pumpAndSettle();
+
     expect(find.text('No saved members yet'), findsOneWidget);
     expect(manualRecategorizationService.movedAssetId, 'asset_1');
     expect(manualRecategorizationService.targetCellId, 'people');
