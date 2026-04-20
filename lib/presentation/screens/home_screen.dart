@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/media_album.dart';
+import '../../application/models/scan_scope.dart';
 import '../../application/services/folder_detail_service.dart';
 import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
+import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../application/services/thumbnail_service.dart';
 import '../../data/services/persisted_folder_detail_service.dart';
 import '../../data/services/persisted_home_dashboard_service.dart';
+import '../../data/services/photo_manager_media_library_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../data/services/real_scan_coordinator.dart';
 import '../theme/hive_colors.dart';
@@ -19,12 +23,14 @@ class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
     this.homeDashboardService,
+    this.mediaLibraryService,
     this.createScanCoordinator,
     this.createFolderDetailService,
     this.createThumbnailService,
   });
 
   final HomeDashboardService? homeDashboardService;
+  final MediaLibraryService? mediaLibraryService;
   final ScanCoordinator Function()? createScanCoordinator;
   final FolderDetailService Function()? createFolderDetailService;
   final ThumbnailService Function()? createThumbnailService;
@@ -35,6 +41,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late final HomeDashboardService _homeDashboardService;
+  late final MediaLibraryService _mediaLibraryService;
   late Future<HomeDashboardSnapshot> _dashboardFuture;
 
   @override
@@ -42,6 +49,8 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _homeDashboardService =
         widget.homeDashboardService ?? PersistedHomeDashboardService.standard();
+    _mediaLibraryService =
+        widget.mediaLibraryService ?? const PhotoManagerMediaLibraryService();
     _reloadDashboard();
   }
 
@@ -49,10 +58,11 @@ class _HomeScreenState extends State<HomeScreen> {
     _dashboardFuture = _homeDashboardService.loadDashboard();
   }
 
-  Future<void> _openScanProgress() async {
+  Future<void> _openScanProgress(ScanScope scope) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ScanProgressScreen(
+          scanScope: scope,
           scanCoordinator:
               widget.createScanCoordinator?.call() ??
               RealScanCoordinator.seeded(),
@@ -67,6 +77,26 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _reloadDashboard();
     });
+  }
+
+  Future<void> _chooseScanScope() async {
+    final scope = await showModalBottomSheet<ScanScope>(
+      context: context,
+      backgroundColor: HiveColors.surfaceElevated,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
+      builder: (context) {
+        return _ScanScopeSheet(mediaLibraryService: _mediaLibraryService);
+      },
+    );
+
+    if (!mounted || scope == null) {
+      return;
+    }
+
+    await _openScanProgress(scope);
   }
 
   Future<void> _openFolderDetail(
@@ -224,7 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               Expanded(
                                 child: ElevatedButton.icon(
-                                  onPressed: _openScanProgress,
+                                  onPressed: _chooseScanScope,
                                   icon: const Icon(Icons.hive_outlined),
                                   label: const Text('Start Scan'),
                                 ),
@@ -387,7 +417,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
-                                  'This shell is prepared for real asset counts, generated cells, and scan history as soon as the pipeline gets wired in.',
+                                  'This shell is prepared for real asset counts, broader cells, and faster test scans from one chosen scope.',
                                   style: theme.textTheme.bodyMedium?.copyWith(
                                     color: HiveColors.textSecondary,
                                   ),
@@ -430,6 +460,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   _HomeCellStyle _styleFor(String styleKey) {
     return switch (styleKey) {
+      'people' => const _HomeCellStyle(
+        color: Color(0xFFE2B06C),
+        icon: Icons.people_alt_rounded,
+      ),
+      'family' => const _HomeCellStyle(
+        color: Color(0xFFF1C98B),
+        icon: Icons.family_restroom_rounded,
+      ),
       'pets' => const _HomeCellStyle(
         color: Color(0xFFE59E4D),
         icon: Icons.pets_rounded,
@@ -442,9 +480,25 @@ class _HomeScreenState extends State<HomeScreen> {
         color: Color(0xFFC88538),
         icon: Icons.restaurant_rounded,
       ),
-      'basketball' => const _HomeCellStyle(
+      'screenshots' => const _HomeCellStyle(
+        color: Color(0xFFBCA078),
+        icon: Icons.screenshot_monitor_rounded,
+      ),
+      'tech' => const _HomeCellStyle(
+        color: Color(0xFFB98A56),
+        icon: Icons.devices_rounded,
+      ),
+      'documents' => const _HomeCellStyle(
+        color: Color(0xFFD1A667),
+        icon: Icons.receipt_long_rounded,
+      ),
+      'sports' => const _HomeCellStyle(
         color: Color(0xFFB8732C),
-        icon: Icons.sports_basketball_rounded,
+        icon: Icons.sports_soccer_rounded,
+      ),
+      'animation' => const _HomeCellStyle(
+        color: Color(0xFFC78D4A),
+        icon: Icons.theater_comedy_rounded,
       ),
       'unsorted' => const _HomeCellStyle(
         color: Color(0xFF8F6B46),
@@ -455,6 +509,187 @@ class _HomeScreenState extends State<HomeScreen> {
         icon: Icons.folder_open_rounded,
       ),
     };
+  }
+}
+
+class _ScanScopeSheet extends StatelessWidget {
+  const _ScanScopeSheet({required this.mediaLibraryService});
+
+  final MediaLibraryService mediaLibraryService;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+        child: FutureBuilder<List<MediaAlbum>>(
+          future: mediaLibraryService.getAvailableAlbums(),
+          builder: (context, snapshot) {
+            final albums = snapshot.data ?? const <MediaAlbum>[];
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: HiveColors.outline,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text('Choose Scan Scope', style: theme.textTheme.headlineSmall),
+                const SizedBox(height: 10),
+                Text(
+                  'Pick a smaller slice for fast iteration or scan the whole accessible library.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: HiveColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                _ScopeOptionTile(
+                  title: 'All Photos',
+                  subtitle: 'Scan the full accessible library.',
+                  icon: Icons.photo_library_rounded,
+                  onTap: () =>
+                      Navigator.of(context).pop(const ScanScope.allPhotos()),
+                ),
+                const SizedBox(height: 10),
+                _ScopeOptionTile(
+                  title: 'Limited-Access Photos',
+                  subtitle:
+                      'Scan the photos currently available to HIVE under limited access.',
+                  icon: Icons.verified_user_outlined,
+                  onTap: () => Navigator.of(
+                    context,
+                  ).pop(const ScanScope.limitedPhotos()),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  'Albums & Folders',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: HiveColors.honey,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                if (snapshot.connectionState != ConnectionState.done)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (albums.isEmpty)
+                  Text(
+                    'No smaller albums are available yet. You can still scan all accessible photos.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: HiveColors.textSecondary,
+                    ),
+                  )
+                else
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 320),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: albums.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final album = albums[index];
+                        return _ScopeOptionTile(
+                          title: album.name,
+                          subtitle:
+                              '${album.assetCount} assets • ${album.isFolder ? 'Folder' : 'Album'}',
+                          icon: album.isFolder
+                              ? Icons.folder_open_rounded
+                              : Icons.collections_bookmark_rounded,
+                          onTap: () => Navigator.of(context).pop(
+                            ScanScope.album(
+                              albumId: album.id,
+                              albumName: album.name,
+                              isFolder: album.isFolder,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ScopeOptionTile extends StatelessWidget {
+  const _ScopeOptionTile({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: onTap,
+        child: Ink(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: HiveColors.surface.withValues(alpha: 0.9),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: HiveColors.outline),
+          ),
+          child: Row(
+            children: [
+              Container(
+                height: 42,
+                width: 42,
+                decoration: BoxDecoration(
+                  color: HiveColors.honey.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: HiveColors.honey, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: HiveColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Icon(Icons.chevron_right_rounded, color: HiveColors.honey),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

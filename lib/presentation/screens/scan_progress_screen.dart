@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../application/models/scan_scope.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../domain/entities/scan_run.dart';
 import '../../data/services/real_scan_coordinator.dart';
@@ -9,9 +10,14 @@ import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 
 class ScanProgressScreen extends StatefulWidget {
-  const ScanProgressScreen({super.key, this.scanCoordinator});
+  const ScanProgressScreen({
+    super.key,
+    this.scanCoordinator,
+    this.scanScope = const ScanScope.allPhotos(),
+  });
 
   final ScanCoordinator? scanCoordinator;
+  final ScanScope scanScope;
 
   @override
   State<ScanProgressScreen> createState() => _ScanProgressScreenState();
@@ -53,7 +59,9 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
       return;
     }
 
-    final startedRun = await _scanCoordinator.startFullScan();
+    final startedRun = await _scanCoordinator.startFullScan(
+      scope: widget.scanScope,
+    );
     if (!mounted) {
       return;
     }
@@ -222,6 +230,13 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
                             style: theme.textTheme.labelLarge?.copyWith(
                               color: HiveColors.honey,
                             ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Scope • ${widget.scanScope.label}',
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            color: HiveColors.textSecondary,
                           ),
                         ),
                         const SizedBox(height: 20),

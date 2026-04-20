@@ -11,9 +11,65 @@ class KeywordFolderMappingService implements FolderMappingService {
 
   static const List<_CellRule> _rules = [
     _CellRule(
+      cellId: 'family',
+      cellName: 'Family',
+      description: 'Parents, siblings, children, and close shared moments',
+      styleKey: 'family',
+      featured: true,
+      keywords: {
+        'family',
+        'parent',
+        'parents',
+        'mother',
+        'father',
+        'mom',
+        'dad',
+        'baby',
+        'infant',
+        'toddler',
+        'child',
+        'children',
+        'siblings',
+        'brother',
+        'sister',
+        'wedding',
+        'bride',
+        'groom',
+        'couple',
+      },
+      priorityBias: 0.18,
+    ),
+    _CellRule(
+      cellId: 'people',
+      cellName: 'People',
+      description: 'Portraits, selfies, crowds, and human moments',
+      styleKey: 'people',
+      featured: true,
+      keywords: {
+        'person',
+        'people',
+        'human',
+        'human being',
+        'portrait',
+        'selfie',
+        'face',
+        'head',
+        'facial expression',
+        'smile',
+        'man',
+        'woman',
+        'boy',
+        'girl',
+        'crowd',
+      },
+      priorityBias: 0.12,
+    ),
+    _CellRule(
       cellId: 'pets',
       cellName: 'Pets',
       description: 'Pets, familiar faces, and daily companions',
+      styleKey: 'pets',
+      featured: true,
       keywords: {
         'dog',
         'dogs',
@@ -34,11 +90,13 @@ class KeywordFolderMappingService implements FolderMappingService {
         'feline',
         'domestic cat',
       },
+      priorityBias: 0.14,
     ),
     _CellRule(
       cellId: 'travel',
       cellName: 'Travel',
       description: 'Trips, landmarks, and places worth revisiting',
+      styleKey: 'travel',
       keywords: {
         'travel',
         'vacation',
@@ -55,14 +113,16 @@ class KeywordFolderMappingService implements FolderMappingService {
         'aircraft',
         'airport',
         'hotel',
-        'road',
+        'road trip',
         'destination',
+        'landmark',
       },
     ),
     _CellRule(
       cellId: 'food',
       cellName: 'Food',
       description: 'Meals, drinks, and things worth ordering again',
+      styleKey: 'food',
       keywords: {
         'food',
         'meal',
@@ -81,24 +141,120 @@ class KeywordFolderMappingService implements FolderMappingService {
         'produce',
         'plate',
         'restaurant',
+        'coffee',
       },
     ),
     _CellRule(
-      cellId: 'basketball',
-      cellName: 'Basketball',
-      description: 'Courtside moments, games, and training clips',
+      cellId: 'screenshots',
+      cellName: 'Screenshots',
+      description: 'Captured screens, app states, and saved references',
+      styleKey: 'screenshots',
       keywords: {
+        'screenshot',
+        'screen',
+        'user interface',
+        'software',
+        'web page',
+        'application',
+        'text message',
+        'website',
+        'display',
+      },
+      assetTypes: {MediaAssetType.screenshot},
+      priorityBias: 0.25,
+    ),
+    _CellRule(
+      cellId: 'devices_tech',
+      cellName: 'Devices / Tech',
+      description: 'Gadgets, workstations, and everyday tech scenes',
+      styleKey: 'tech',
+      keywords: {
+        'computer',
+        'laptop',
+        'desktop computer',
+        'monitor',
+        'keyboard',
+        'mouse',
+        'tablet computer',
+        'tablet',
+        'mobile phone',
+        'smartphone',
+        'camera',
+        'electronics',
+        'technology',
+        'device',
+        'headphones',
+        'headset',
+      },
+    ),
+    _CellRule(
+      cellId: 'documents_receipts',
+      cellName: 'Documents / Receipts',
+      description: 'Paperwork, receipts, and reference documents',
+      styleKey: 'documents',
+      keywords: {
+        'document',
+        'text',
+        'paper',
+        'receipt',
+        'invoice',
+        'bill',
+        'form',
+        'letter',
+        'menu',
+        'certificate',
+        'page',
+        'poster',
+      },
+      priorityBias: 0.08,
+    ),
+    _CellRule(
+      cellId: 'sports',
+      cellName: 'Sports',
+      description: 'Courts, fields, games, and training moments',
+      styleKey: 'sports',
+      keywords: {
+        'sport',
+        'sports',
+        'athlete',
+        'stadium',
+        'arena',
+        'court',
+        'field',
+        'ball',
         'basketball',
         'basketball hoop',
         'basketball court',
-        'sports equipment',
-        'ball',
-        'athlete',
+        'football',
+        'soccer',
+        'tennis',
+        'baseball',
+        'running',
+        'gym',
         'jersey',
-        'stadium',
-        'arena',
-        'sport venue',
+        'race',
       },
+      priorityBias: 0.08,
+    ),
+    _CellRule(
+      cellId: 'animation_cartoon_meme',
+      cellName: 'Animation / Cartoon / Meme',
+      description: 'Cartoons, anime, memes, and stylized art',
+      styleKey: 'animation',
+      keywords: {
+        'cartoon',
+        'animation',
+        'anime',
+        'illustration',
+        'drawing',
+        'graphic design',
+        'comic',
+        'meme',
+        'sticker',
+        'mascot',
+        'clip art',
+      },
+      priorityBias: 0.16,
     ),
   ];
 
@@ -106,10 +262,11 @@ class KeywordFolderMappingService implements FolderMappingService {
     cellId: 'unsorted',
     cellName: 'Unsorted',
     description: 'Assets that still need a stronger signal',
+    styleKey: 'unsorted',
     keywords: {},
   );
 
-  static const double _fallbackThreshold = 0.24;
+  static const double _fallbackThreshold = 0.26;
   static const int _maxExplanationLabels = 4;
 
   final DateTime Function() _now;
@@ -169,6 +326,7 @@ class KeywordFolderMappingService implements FolderMappingService {
             assetIds: List<String>.unmodifiable(
               assetsByCellId[rule.cellId] ?? const <String>[],
             ),
+            isPinned: rule.featured,
           ),
         )
         .toList(growable: false);
@@ -185,7 +343,7 @@ class KeywordFolderMappingService implements FolderMappingService {
         .take(_maxExplanationLabels)
         .toList(growable: false);
 
-    if (topLabels.isEmpty) {
+    if (topLabels.isEmpty && asset.type != MediaAssetType.screenshot) {
       return AssetMappingExplanation(
         cellId: _unsortedRule.cellId,
         cellName: _unsortedRule.cellName,
@@ -197,7 +355,7 @@ class KeywordFolderMappingService implements FolderMappingService {
 
     _RuleScore? bestScore;
     for (final rule in _rules) {
-      final current = _scoreRule(rule: rule, labels: topLabels);
+      final current = _scoreRule(rule: rule, asset: asset, labels: topLabels);
       if (bestScore == null || current.score > bestScore.score) {
         bestScore = current;
       }
@@ -226,10 +384,16 @@ class KeywordFolderMappingService implements FolderMappingService {
 
   _RuleScore _scoreRule({
     required _CellRule rule,
+    required MediaAsset asset,
     required List<ClassificationLabel> labels,
   }) {
-    var score = 0.0;
+    var score = rule.priorityBias;
     final matchedKeywords = <String>{};
+
+    if (rule.assetTypes.contains(asset.type)) {
+      score += 0.9;
+      matchedKeywords.add(asset.type.name);
+    }
 
     for (var index = 0; index < labels.length; index++) {
       final label = labels[index];
@@ -266,9 +430,17 @@ class KeywordFolderMappingService implements FolderMappingService {
     required String normalized,
   }) {
     final normalizedKeyword = _normalize(keyword);
+    if (normalized == normalizedKeyword) {
+      return 1.18;
+    }
+
+    if (tokens.contains(normalizedKeyword)) {
+      return 1.0;
+    }
+
     if (normalized.contains(normalizedKeyword) ||
         normalizedKeyword.contains(normalized)) {
-      return 1.0;
+      return 0.96;
     }
 
     final keywordTokens = _tokenize(normalizedKeyword);
@@ -282,7 +454,7 @@ class KeywordFolderMappingService implements FolderMappingService {
     }
 
     if (overlap == keywordTokens.length || overlap == tokens.length) {
-      return 0.92;
+      return 0.9;
     }
 
     final coverage = overlap / keywordTokens.length;
@@ -315,13 +487,21 @@ class _CellRule {
     required this.cellId,
     required this.cellName,
     required this.description,
+    required this.styleKey,
     required this.keywords,
+    this.featured = false,
+    this.priorityBias = 0,
+    this.assetTypes = const <MediaAssetType>{},
   });
 
   final String cellId;
   final String cellName;
   final String description;
+  final String styleKey;
   final Set<String> keywords;
+  final bool featured;
+  final double priorityBias;
+  final Set<MediaAssetType> assetTypes;
 }
 
 class _RuleScore {

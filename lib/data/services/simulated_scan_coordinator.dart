@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import '../../application/models/scan_scope.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
@@ -35,10 +36,11 @@ class SimulatedScanCoordinator implements ScanCoordinator {
   ];
 
   static const List<String> _detectedCells = [
+    'People',
     'Pets',
     'Travel',
     'Food',
-    'Basketball',
+    'Sports',
     'Unsorted',
   ];
 
@@ -81,14 +83,16 @@ class SimulatedScanCoordinator implements ScanCoordinator {
   }
 
   @override
-  Future<ScanRun> startFullScan() async {
+  Future<ScanRun> startFullScan({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
     final currentRun = _activeRun;
 
     if (currentRun != null && !currentRun.isTerminal) {
       return currentRun;
     }
 
-    final totalAssets = await _resolveTotalAssets();
+    final totalAssets = await _resolveTotalAssets(scope: scope);
     final now = DateTime.now();
     final runId = 'scan_${now.millisecondsSinceEpoch}';
 
@@ -120,9 +124,11 @@ class SimulatedScanCoordinator implements ScanCoordinator {
     }
   }
 
-  Future<int> _resolveTotalAssets() async {
+  Future<int> _resolveTotalAssets({required ScanScope scope}) async {
     try {
-      final total = await _mediaLibraryService.getEstimatedAssetCount();
+      final total = await _mediaLibraryService.getEstimatedAssetCount(
+        scope: scope,
+      );
       return total > 0 ? total : 529;
     } catch (_) {
       return 529;

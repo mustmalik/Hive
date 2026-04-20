@@ -47,6 +47,16 @@ class PersistedHomeDashboardService implements HomeDashboardService {
 
   static const Map<String, ({String summary, String styleKey, bool featured})>
   _previewContent = {
+    'People': (
+      summary: 'Portraits, selfies, and shared moments',
+      styleKey: 'people',
+      featured: true,
+    ),
+    'Family': (
+      summary: 'The people you return to most',
+      styleKey: 'family',
+      featured: true,
+    ),
     'Pets': (
       summary: 'Warm moments and familiar faces',
       styleKey: 'pets',
@@ -58,9 +68,29 @@ class PersistedHomeDashboardService implements HomeDashboardService {
       featured: false,
     ),
     'Food': (summary: 'Plates worth saving', styleKey: 'food', featured: false),
-    'Basketball': (
-      summary: 'Game nights and court-side shots',
-      styleKey: 'basketball',
+    'Screenshots': (
+      summary: 'Captured references and saved screens',
+      styleKey: 'screenshots',
+      featured: false,
+    ),
+    'Devices / Tech': (
+      summary: 'Gadgets, desks, and digital gear',
+      styleKey: 'tech',
+      featured: false,
+    ),
+    'Documents / Receipts': (
+      summary: 'Paperwork and references worth keeping',
+      styleKey: 'documents',
+      featured: false,
+    ),
+    'Sports': (
+      summary: 'Games, training, and courtside energy',
+      styleKey: 'sports',
+      featured: true,
+    ),
+    'Animation / Cartoon / Meme': (
+      summary: 'Stylized art, jokes, and saved internet moments',
+      styleKey: 'animation',
       featured: true,
     ),
     'Unsorted': (

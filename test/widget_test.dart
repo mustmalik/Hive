@@ -10,8 +10,11 @@ import 'package:hive_flutter_v1/application/models/asset_mapping_explanation.dar
 import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_snapshot.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_item.dart';
+import 'package:hive_flutter_v1/application/models/media_album.dart';
+import 'package:hive_flutter_v1/application/models/scan_scope.dart';
 import 'package:hive_flutter_v1/application/services/folder_detail_service.dart';
 import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
+import 'package:hive_flutter_v1/application/services/media_library_service.dart';
 import 'package:hive_flutter_v1/application/services/permission_service.dart';
 import 'package:hive_flutter_v1/application/services/scan_coordinator.dart';
 import 'package:hive_flutter_v1/application/services/thumbnail_service.dart';
@@ -103,7 +106,7 @@ void main() {
     expect(find.text('dog'), findsWidgets);
   });
 
-  testWidgets('HomeScreen start scan opens scan progress', (
+  testWidgets('HomeScreen can choose a smaller scan scope', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(430, 932);
@@ -118,6 +121,7 @@ void main() {
         theme: AppTheme.darkTheme,
         home: HomeScreen(
           homeDashboardService: _FakeHomeDashboardService(),
+          mediaLibraryService: _FakeMediaLibraryService(),
           createScanCoordinator: _FakeScanCoordinator.new,
         ),
       ),
@@ -127,9 +131,16 @@ void main() {
     await tester.tap(find.text('Start Scan'));
     await tester.pumpAndSettle();
 
+    expect(find.text('Choose Scan Scope'), findsOneWidget);
+    expect(find.text('Summer Roll'), findsOneWidget);
+
+    await tester.tap(find.text('Summer Roll'));
+    await tester.pumpAndSettle();
+
     expect(find.text('Scan Progress'), findsOneWidget);
     expect(find.text('Scanning your library'), findsOneWidget);
-    expect(find.text('12 of 529'), findsOneWidget);
+    expect(find.text('Scope • Summer Roll'), findsOneWidget);
+    expect(find.text('3 of 8'), findsOneWidget);
   });
 }
 
@@ -196,13 +207,17 @@ class _FakeScanCoordinator implements ScanCoordinator {
   }
 
   @override
-  Future<ScanRun> startFullScan() async {
+  Future<ScanRun> startFullScan({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
+    final discoveredAssetCount = scope.kind == ScanScopeKind.album ? 8 : 529;
+    final classifiedAssetCount = scope.kind == ScanScopeKind.album ? 3 : 12;
     final run = ScanRun(
       id: 'scan_test',
       status: ScanRunStatus.running,
       startedAt: DateTime.now(),
-      discoveredAssetCount: 529,
-      classifiedAssetCount: 12,
+      discoveredAssetCount: discoveredAssetCount,
+      classifiedAssetCount: classifiedAssetCount,
       generatedCellCount: 1,
       currentStageLabel: 'Grouping moments into cells',
       currentItemTitle: 'IMG_1042.JPG',
@@ -215,6 +230,37 @@ class _FakeScanCoordinator implements ScanCoordinator {
 
   @override
   Stream<ScanRun> watchActiveRun() => _controller.stream;
+}
+
+class _FakeMediaLibraryService implements MediaLibraryService {
+  @override
+  Future<List<MediaAsset>> fetchAssets({
+    DateTime? updatedAfter,
+    int page = 0,
+    int pageSize = 200,
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
+    return const [];
+  }
+
+  @override
+  Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
+    return const [
+      MediaAlbum(id: 'album_summer', name: 'Summer Roll', assetCount: 8),
+    ];
+  }
+
+  @override
+  Future<MediaAsset?> getAssetById(String assetId) async {
+    return null;
+  }
+
+  @override
+  Future<int> getEstimatedAssetCount({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
+    return scope.kind == ScanScopeKind.album ? 8 : 529;
+  }
 }
 
 class _FakeFolderDetailService implements FolderDetailService {

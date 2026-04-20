@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_classification_repository.dart';
 import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
+import 'package:hive_flutter_v1/application/models/media_album.dart';
+import 'package:hive_flutter_v1/application/models/scan_scope.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_folder_cell_repository.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_media_asset_repository.dart';
 import 'package:hive_flutter_v1/application/services/classification_service.dart';
@@ -116,6 +118,7 @@ class _FakeMediaLibraryService implements MediaLibraryService {
     DateTime? updatedAfter,
     int page = 0,
     int pageSize = 200,
+    ScanScope scope = const ScanScope.allPhotos(),
   }) async {
     final start = page * pageSize;
     if (start >= _assets.length) {
@@ -140,7 +143,14 @@ class _FakeMediaLibraryService implements MediaLibraryService {
   }
 
   @override
-  Future<int> getEstimatedAssetCount() async => _assets.length;
+  Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
+    return const [];
+  }
+
+  @override
+  Future<int> getEstimatedAssetCount({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async => _assets.length;
 }
 
 class _FakeClassificationService extends ClassificationService {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../application/models/classification_outcome.dart';
+import '../../application/models/scan_scope.dart';
 import '../../application/repositories/classification_repository.dart';
 import '../../application/repositories/folder_cell_repository.dart';
 import '../../application/repositories/media_asset_repository.dart';
@@ -90,14 +91,16 @@ class RealScanCoordinator implements ScanCoordinator {
   }
 
   @override
-  Future<ScanRun> startFullScan() async {
+  Future<ScanRun> startFullScan({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
     final currentRun = _activeRun;
     if (currentRun != null && !currentRun.isTerminal) {
       return currentRun;
     }
 
     final now = _now();
-    final totalAssets = await _resolveTotalAssets();
+    final totalAssets = await _resolveTotalAssets(scope: scope);
     final queuedRun = ScanRun(
       id: 'scan_${now.millisecondsSinceEpoch}',
       status: ScanRunStatus.queued,
@@ -112,7 +115,7 @@ class RealScanCoordinator implements ScanCoordinator {
 
     _cancelRequested = false;
     await _emitRun(queuedRun);
-    _activeTask = _performScan(queuedRun);
+    _activeTask = _performScan(queuedRun, scope: scope);
     unawaited(_activeTask);
     return queuedRun;
   }
@@ -120,7 +123,10 @@ class RealScanCoordinator implements ScanCoordinator {
   @override
   Stream<ScanRun> watchActiveRun() => _controller.stream;
 
-  Future<void> _performScan(ScanRun startingRun) async {
+  Future<void> _performScan(
+    ScanRun startingRun, {
+    required ScanScope scope,
+  }) async {
     final processedAssets = <MediaAsset>[];
     final labelsByAssetId = <String, List<ClassificationLabel>>{};
     final outcomesByAssetId = <String, ClassificationOutcome>{};
@@ -134,6 +140,7 @@ class RealScanCoordinator implements ScanCoordinator {
         final batch = await _mediaLibraryService.fetchAssets(
           page: page,
           pageSize: _pageSize,
+          scope: scope,
         );
 
         if (batch.isEmpty) {
@@ -328,9 +335,11 @@ class RealScanCoordinator implements ScanCoordinator {
     }
   }
 
-  Future<int> _resolveTotalAssets() async {
+  Future<int> _resolveTotalAssets({required ScanScope scope}) async {
     try {
-      final total = await _mediaLibraryService.getEstimatedAssetCount();
+      final total = await _mediaLibraryService.getEstimatedAssetCount(
+        scope: scope,
+      );
       return total;
     } catch (_) {
       return 0;

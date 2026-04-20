@@ -1,3 +1,4 @@
+import '../models/scan_scope.dart';
 import '../../domain/entities/scan_run.dart';
 
 abstract interface class ScanCoordinator {
@@ -5,7 +6,9 @@ abstract interface class ScanCoordinator {
 
   Future<ScanRun?> getLatestRun();
 
-  Future<ScanRun> startFullScan();
+  Future<ScanRun> startFullScan({
+    ScanScope scope = const ScanScope.allPhotos(),
+  });
 
   Future<void> cancelActiveRun();
 }
