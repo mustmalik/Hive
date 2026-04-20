@@ -82,6 +82,7 @@ class LocalScanResultStore {
 
 class StoredScanSnapshot {
   const StoredScanSnapshot({
+    this.settings,
     this.cells = const <Map<String, dynamic>>[],
     this.assets = const <Map<String, dynamic>>[],
     this.classifications = const <Map<String, dynamic>>[],
@@ -91,6 +92,7 @@ class StoredScanSnapshot {
 
   factory StoredScanSnapshot.fromJson(Map<String, dynamic> json) {
     return StoredScanSnapshot(
+      settings: _readMap(json['settings']),
       cells: _readList(json['cells']),
       assets: _readList(json['assets']),
       classifications: _readList(json['classifications']),
@@ -99,6 +101,7 @@ class StoredScanSnapshot {
     );
   }
 
+  final Map<String, dynamic>? settings;
   final List<Map<String, dynamic>> cells;
   final List<Map<String, dynamic>> assets;
   final List<Map<String, dynamic>> classifications;
@@ -107,6 +110,7 @@ class StoredScanSnapshot {
 
   Map<String, dynamic> toJson() {
     return {
+      'settings': settings,
       'cells': cells,
       'assets': assets,
       'classifications': classifications,
@@ -124,5 +128,13 @@ class StoredScanSnapshot {
         .whereType<Map>()
         .map((entry) => entry.cast<String, dynamic>())
         .toList(growable: false);
+  }
+
+  static Map<String, dynamic>? _readMap(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+
+    return value.cast<String, dynamic>();
   }
 }

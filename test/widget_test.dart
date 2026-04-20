@@ -20,7 +20,9 @@ import 'package:hive_flutter_v1/application/services/media_library_service.dart'
 import 'package:hive_flutter_v1/application/services/permission_service.dart';
 import 'package:hive_flutter_v1/application/services/scan_coordinator.dart';
 import 'package:hive_flutter_v1/application/services/thumbnail_service.dart';
+import 'package:hive_flutter_v1/data/services/in_memory_settings_service.dart';
 import 'package:hive_flutter_v1/domain/entities/classification_label.dart';
+import 'package:hive_flutter_v1/domain/entities/app_settings.dart';
 import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
 import 'package:hive_flutter_v1/domain/entities/scan_run.dart';
 import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
@@ -84,6 +86,7 @@ void main() {
           homeDashboardService: _FakeHomeDashboardService(),
           createFolderDetailService: _FakeFolderDetailService.new,
           createThumbnailService: _FakeThumbnailService.new,
+          settingsService: InMemorySettingsService(),
         ),
       ),
     );
@@ -107,7 +110,10 @@ void main() {
     expect(find.text('Move to Cell'), findsOneWidget);
     expect(find.text('Why This Landed Here'), findsOneWidget);
 
-    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, -260));
+    await tester.drag(
+      find.byType(CustomScrollView).last,
+      const Offset(0, -260),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Why This Landed Here'));
     await tester.pumpAndSettle();
@@ -135,6 +141,7 @@ void main() {
           homeDashboardService: _FakeHomeDashboardService(),
           mediaLibraryService: _FakeMediaLibraryService(),
           createScanCoordinator: _FakeScanCoordinator.new,
+          settingsService: InMemorySettingsService(),
         ),
       ),
     );
@@ -153,6 +160,47 @@ void main() {
     expect(find.text('Scanning your library'), findsOneWidget);
     expect(find.text('Scope • Summer Roll'), findsOneWidget);
     expect(find.text('3 of 8'), findsOneWidget);
+  });
+
+  testWidgets('HomeScreen can reuse the last remembered scan scope', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: HomeScreen(
+          homeDashboardService: _FakeHomeDashboardService(),
+          mediaLibraryService: _FakeMediaLibraryService(),
+          createScanCoordinator: _FakeScanCoordinator.new,
+          settingsService: InMemorySettingsService(
+            initialSettings: const AppSettings(
+              lastUsedScanScope: ScanScope.album(
+                albumId: 'album_summer',
+                albumName: 'Summer Roll',
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Use Last Scan Scope'), findsOneWidget);
+    expect(find.text('Last scope'), findsOneWidget);
+    expect(find.text('Summer Roll'), findsWidgets);
+
+    await tester.tap(find.text('Use Last Scan Scope'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan Progress'), findsOneWidget);
+    expect(find.text('Scope • Summer Roll'), findsOneWidget);
   });
 
   testWidgets('FolderDetailScreen can move an asset into another cell', (
@@ -197,7 +245,10 @@ void main() {
     expect(find.text('Asset Detail'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
 
-    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, -260));
+    await tester.drag(
+      find.byType(CustomScrollView).last,
+      const Offset(0, -260),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Move to Cell'));
     await tester.pumpAndSettle();

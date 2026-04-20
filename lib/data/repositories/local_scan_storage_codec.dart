@@ -1,5 +1,7 @@
 import '../../application/models/classification_outcome.dart';
+import '../../application/models/scan_scope.dart';
 import '../../domain/entities/classification_label.dart';
+import '../../domain/entities/app_settings.dart';
 import '../../domain/entities/folder_cell.dart';
 import '../../domain/entities/manual_override.dart';
 import '../../domain/entities/media_asset.dart';
@@ -8,6 +10,7 @@ import '../services/local_scan_result_store.dart';
 
 StoredScanSnapshot copyStoredScanSnapshot(
   StoredScanSnapshot snapshot, {
+  Map<String, dynamic>? settings,
   List<Map<String, dynamic>>? cells,
   List<Map<String, dynamic>>? assets,
   List<Map<String, dynamic>>? classifications,
@@ -15,6 +18,7 @@ StoredScanSnapshot copyStoredScanSnapshot(
   List<Map<String, dynamic>>? runs,
 }) {
   return StoredScanSnapshot(
+    settings: settings ?? snapshot.settings,
     cells: cells ?? snapshot.cells,
     assets: assets ?? snapshot.assets,
     classifications: classifications ?? snapshot.classifications,
@@ -286,5 +290,49 @@ ManualOverride manualOverrideFromJson(Map<String, dynamic> json) {
     cellId: json['cellId'] as String?,
     labelId: json['labelId'] as String?,
     note: json['note'] as String?,
+  );
+}
+
+Map<String, dynamic> appSettingsToJson(AppSettings settings) {
+  return {
+    'scanImages': settings.scanImages,
+    'scanVideos': settings.scanVideos,
+    'allowSuggestedCells': settings.allowSuggestedCells,
+    'preferLimitedLibraryManagement': settings.preferLimitedLibraryManagement,
+    'thumbnailQuality': settings.thumbnailQuality.name,
+    'lastCompletedScanAt': settings.lastCompletedScanAt?.toIso8601String(),
+    'lastUsedScanScope': settings.lastUsedScanScope?.toJson(),
+  };
+}
+
+AppSettings appSettingsFromJson(Map<String, dynamic>? json) {
+  if (json == null) {
+    return const AppSettings();
+  }
+
+  final thumbnailQualityName = json['thumbnailQuality'];
+  final thumbnailQuality = ThumbnailQuality.values.where(
+    (value) => value.name == thumbnailQualityName,
+  );
+
+  final lastCompletedScanAtRaw = json['lastCompletedScanAt'];
+
+  return AppSettings(
+    scanImages: json['scanImages'] as bool? ?? true,
+    scanVideos: json['scanVideos'] as bool? ?? true,
+    allowSuggestedCells: json['allowSuggestedCells'] as bool? ?? true,
+    preferLimitedLibraryManagement:
+        json['preferLimitedLibraryManagement'] as bool? ?? true,
+    thumbnailQuality: thumbnailQuality.isEmpty
+        ? ThumbnailQuality.balanced
+        : thumbnailQuality.first,
+    lastCompletedScanAt: lastCompletedScanAtRaw is String
+        ? DateTime.tryParse(lastCompletedScanAtRaw)
+        : null,
+    lastUsedScanScope: ScanScope.fromJson(
+      json['lastUsedScanScope'] is Map
+          ? (json['lastUsedScanScope'] as Map).cast<String, dynamic>()
+          : null,
+    ),
   );
 }

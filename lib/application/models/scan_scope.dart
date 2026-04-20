@@ -42,4 +42,49 @@ class ScanScope {
   final bool isFolder;
 
   bool get isAlbumSelection => kind == ScanScopeKind.album;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'kind': kind.name,
+      'label': label,
+      'description': description,
+      'albumId': albumId,
+      'isFolder': isFolder,
+    };
+  }
+
+  static ScanScope? fromJson(Map<String, dynamic>? json) {
+    if (json == null) {
+      return null;
+    }
+
+    final kindName = json['kind'];
+    if (kindName is! String) {
+      return null;
+    }
+
+    final kind = ScanScopeKind.values.where((value) => value.name == kindName);
+    if (kind.isEmpty) {
+      return null;
+    }
+
+    switch (kind.first) {
+      case ScanScopeKind.allPhotos:
+        return const ScanScope.allPhotos();
+      case ScanScopeKind.limitedPhotos:
+        return const ScanScope.limitedPhotos();
+      case ScanScopeKind.album:
+        final albumId = json['albumId'];
+        final label = json['label'];
+        if (albumId is! String || albumId.isEmpty || label is! String) {
+          return null;
+        }
+
+        return ScanScope.album(
+          albumId: albumId,
+          albumName: label,
+          isFolder: json['isFolder'] == true,
+        );
+    }
+  }
 }

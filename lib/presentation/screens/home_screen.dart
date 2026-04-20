@@ -8,10 +8,12 @@ import '../../application/services/home_dashboard_service.dart';
 import '../../application/services/manual_recategorization_service.dart';
 import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
+import '../../application/services/settings_service.dart';
 import '../../application/services/thumbnail_service.dart';
 import '../../data/services/persisted_folder_detail_service.dart';
 import '../../data/services/persisted_home_dashboard_service.dart';
 import '../../data/services/persisted_manual_recategorization_service.dart';
+import '../../data/services/local_settings_service.dart';
 import '../../data/services/photo_manager_media_library_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../data/services/real_scan_coordinator.dart';
@@ -30,6 +32,7 @@ class HomeScreen extends StatefulWidget {
     this.createFolderDetailService,
     this.createManualRecategorizationService,
     this.createThumbnailService,
+    this.settingsService,
   });
 
   final HomeDashboardService? homeDashboardService;
@@ -39,6 +42,7 @@ class HomeScreen extends StatefulWidget {
   final ManualRecategorizationService Function()?
   createManualRecategorizationService;
   final ThumbnailService Function()? createThumbnailService;
+  final SettingsService? settingsService;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -47,7 +51,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late final HomeDashboardService _homeDashboardService;
   late final MediaLibraryService _mediaLibraryService;
+  late final SettingsService _settingsService;
   late Future<HomeDashboardSnapshot> _dashboardFuture;
+  ScanScope? _rememberedScope;
+  bool _isLoadingRememberedScope = true;
 
   @override
   void initState() {
@@ -56,15 +63,73 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.homeDashboardService ?? PersistedHomeDashboardService.standard();
     _mediaLibraryService =
         widget.mediaLibraryService ?? const PhotoManagerMediaLibraryService();
+    _settingsService =
+        widget.settingsService ?? LocalSettingsService.standard();
     _reloadDashboard();
+    _loadRememberedScope();
   }
 
   void _reloadDashboard() {
     _dashboardFuture = _homeDashboardService.loadDashboard();
   }
 
+  Future<void> _loadRememberedScope() async {
+    final settings = await _settingsService.loadSettings();
+    final resolved = await _resolveRememberedScope(settings.lastUsedScanScope);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _rememberedScope = resolved;
+      _isLoadingRememberedScope = false;
+    });
+  }
+
+  Future<ScanScope?> _resolveRememberedScope(ScanScope? scope) async {
+    if (scope == null) {
+      return null;
+    }
+
+    if (!scope.isAlbumSelection) {
+      return scope;
+    }
+
+    final albums = await _mediaLibraryService.getAvailableAlbums(limit: 200);
+    for (final album in albums) {
+      if (album.id == scope.albumId) {
+        return ScanScope.album(
+          albumId: album.id,
+          albumName: album.name,
+          isFolder: album.isFolder,
+        );
+      }
+    }
+
+    return null;
+  }
+
+  Future<void> _rememberScope(ScanScope scope) async {
+    final current = await _settingsService.loadSettings();
+    await _settingsService.saveSettings(
+      current.copyWith(lastUsedScanScope: scope),
+    );
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _rememberedScope = scope;
+    });
+  }
+
   Future<void> _openScanProgress(ScanScope scope) async {
-    await Navigator.of(context).push(
+    final navigator = Navigator.of(context);
+    await _rememberScope(scope);
+    if (!mounted) {
+      return;
+    }
+    await navigator.push(
       MaterialPageRoute<void>(
         builder: (_) => ScanProgressScreen(
           scanScope: scope,
@@ -84,6 +149,27 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Future<void> _startPreferredScan() async {
+    if (_isLoadingRememberedScope) {
+      return;
+    }
+
+    final remembered = await _resolveRememberedScope(_rememberedScope);
+    if (!mounted) {
+      return;
+    }
+
+    if (remembered != null) {
+      setState(() {
+        _rememberedScope = remembered;
+      });
+      await _openScanProgress(remembered);
+      return;
+    }
+
+    await _chooseScanScope();
+  }
+
   Future<void> _chooseScanScope() async {
     final scope = await showModalBottomSheet<ScanScope>(
       context: context,
@@ -93,7 +179,10 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
       ),
       builder: (context) {
-        return _ScanScopeSheet(mediaLibraryService: _mediaLibraryService);
+        return _ScanScopeSheet(
+          mediaLibraryService: _mediaLibraryService,
+          rememberedScope: _rememberedScope,
+        );
       },
     );
 
@@ -270,30 +359,46 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               Expanded(
                                 child: ElevatedButton.icon(
-                                  onPressed: _chooseScanScope,
+                                  onPressed: _isLoadingRememberedScope
+                                      ? null
+                                      : _startPreferredScan,
                                   icon: const Icon(Icons.hive_outlined),
-                                  label: const Text('Start Scan'),
+                                  label: Text(
+                                    _rememberedScope == null
+                                        ? 'Start Scan'
+                                        : 'Use Last Scan Scope',
+                                  ),
                                 ),
                               ),
                               const SizedBox(width: 12),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 14,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: HiveColors.surface.withValues(
-                                    alpha: 0.78,
+                              SizedBox(
+                                height: 52,
+                                child: OutlinedButton(
+                                  onPressed: _chooseScanScope,
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
                                   ),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(color: HiveColors.outline),
-                                ),
-                                child: const Icon(
-                                  Icons.chevron_right_rounded,
-                                  size: 20,
+                                  child: const Icon(
+                                    Icons.tune_rounded,
+                                    size: 20,
+                                  ),
                                 ),
                               ),
                             ],
+                          ),
+                          const SizedBox(height: 14),
+                          _RememberedScopeBanner(
+                            rememberedScope: _rememberedScope,
+                            isLoading: _isLoadingRememberedScope,
+                            onUseLast: _rememberedScope == null
+                                ? null
+                                : () => _openScanProgress(_rememberedScope!),
+                            onChange: _chooseScanScope,
                           ),
                         ],
                       ),
@@ -529,9 +634,13 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class _ScanScopeSheet extends StatelessWidget {
-  const _ScanScopeSheet({required this.mediaLibraryService});
+  const _ScanScopeSheet({
+    required this.mediaLibraryService,
+    this.rememberedScope,
+  });
 
   final MediaLibraryService mediaLibraryService;
+  final ScanScope? rememberedScope;
 
   @override
   Widget build(BuildContext context) {
@@ -569,6 +678,17 @@ class _ScanScopeSheet extends StatelessWidget {
                     color: HiveColors.textSecondary,
                   ),
                 ),
+                if (rememberedScope != null) ...[
+                  const SizedBox(height: 18),
+                  _ScopeOptionTile(
+                    title: 'Use Last Scan Scope',
+                    subtitle:
+                        '${rememberedScope!.label} • ${rememberedScope!.description}',
+                    icon: Icons.history_rounded,
+                    emphasized: true,
+                    onTap: () => Navigator.of(context).pop(rememberedScope),
+                  ),
+                ],
                 const SizedBox(height: 18),
                 _ScopeOptionTile(
                   title: 'All Photos',
@@ -649,12 +769,14 @@ class _ScopeOptionTile extends StatelessWidget {
     required this.subtitle,
     required this.icon,
     required this.onTap,
+    this.emphasized = false,
   });
 
   final String title;
   final String subtitle;
   final IconData icon;
   final VoidCallback onTap;
+  final bool emphasized;
 
   @override
   Widget build(BuildContext context) {
@@ -668,9 +790,15 @@ class _ScopeOptionTile extends StatelessWidget {
         child: Ink(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: HiveColors.surface.withValues(alpha: 0.9),
+            color: emphasized
+                ? HiveColors.honey.withValues(alpha: 0.14)
+                : HiveColors.surface.withValues(alpha: 0.9),
             borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: HiveColors.outline),
+            border: Border.all(
+              color: emphasized
+                  ? HiveColors.honey.withValues(alpha: 0.22)
+                  : HiveColors.outline,
+            ),
           ),
           child: Row(
             children: [
@@ -704,6 +832,126 @@ class _ScopeOptionTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _RememberedScopeBanner extends StatelessWidget {
+  const _RememberedScopeBanner({
+    required this.rememberedScope,
+    required this.isLoading,
+    required this.onChange,
+    this.onUseLast,
+  });
+
+  final ScanScope? rememberedScope;
+  final bool isLoading;
+  final VoidCallback onChange;
+  final VoidCallback? onUseLast;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (isLoading) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(
+            height: 14,
+            width: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Restoring your last scan scope',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: HiveColors.textSecondary,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (rememberedScope == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.tune_rounded, size: 16, color: HiveColors.textSecondary),
+          const SizedBox(height: 8),
+          Text(
+            'Choose a smaller scope once, and HIVE will remember it for faster rescans.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: HiveColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          TextButton(onPressed: onChange, child: const Text('Choose')),
+        ],
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: HiveColors.surface.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                height: 32,
+                width: 32,
+                decoration: BoxDecoration(
+                  color: HiveColors.honey.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.history_rounded,
+                  size: 16,
+                  color: HiveColors.honey,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Last scope',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        color: HiveColors.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      rememberedScope!.label,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: HiveColors.honey,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: [
+              if (onUseLast != null)
+                TextButton(onPressed: onUseLast, child: const Text('Use')),
+              TextButton(onPressed: onChange, child: const Text('Change')),
+            ],
+          ),
+        ],
       ),
     );
   }
