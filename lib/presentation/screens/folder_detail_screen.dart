@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/folder_detail_item.dart';
 import '../../application/models/folder_detail_snapshot.dart';
+import '../../application/services/asset_preview_service.dart';
 import '../../application/services/folder_detail_service.dart';
 import '../../application/services/manual_recategorization_service.dart';
 import '../../application/services/thumbnail_service.dart';
+import '../../data/services/photo_manager_asset_preview_service.dart';
 import '../../data/services/persisted_folder_detail_service.dart';
 import '../../data/services/persisted_manual_recategorization_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
@@ -21,6 +23,7 @@ class FolderDetailScreen extends StatefulWidget {
     this.folderDetailService,
     this.manualRecategorizationService,
     this.thumbnailService,
+    this.assetPreviewService,
   });
 
   final String cellId;
@@ -28,6 +31,7 @@ class FolderDetailScreen extends StatefulWidget {
   final FolderDetailService? folderDetailService;
   final ManualRecategorizationService? manualRecategorizationService;
   final ThumbnailService? thumbnailService;
+  final AssetPreviewService? assetPreviewService;
 
   @override
   State<FolderDetailScreen> createState() => _FolderDetailScreenState();
@@ -37,6 +41,7 @@ class _FolderDetailScreenState extends State<FolderDetailScreen> {
   late final FolderDetailService _folderDetailService;
   late final ManualRecategorizationService _manualRecategorizationService;
   late final ThumbnailService _thumbnailService;
+  late final AssetPreviewService _assetPreviewService;
   late Future<FolderDetailSnapshot?> _snapshotFuture;
 
   @override
@@ -49,6 +54,8 @@ class _FolderDetailScreenState extends State<FolderDetailScreen> {
         PersistedManualRecategorizationService.standard();
     _thumbnailService =
         widget.thumbnailService ?? const PhotoManagerThumbnailService();
+    _assetPreviewService =
+        widget.assetPreviewService ?? const PhotoManagerAssetPreviewService();
     _snapshotFuture = _loadSnapshot();
   }
 
@@ -62,15 +69,22 @@ class _FolderDetailScreenState extends State<FolderDetailScreen> {
     });
   }
 
-  Future<void> _openAssetDetail(FolderDetailItem item) async {
+  Future<void> _openAssetDetail(
+    List<FolderDetailItem> items,
+    int initialIndex,
+  ) async {
+    final item = items[initialIndex];
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => PhotoViewerScreen(
           item: item,
+          items: items,
+          initialIndex: initialIndex,
           originCellId: widget.cellId,
           originCellName: widget.cellName,
           manualRecategorizationService: _manualRecategorizationService,
           thumbnailService: _thumbnailService,
+          assetPreviewService: _assetPreviewService,
         ),
       ),
     );
@@ -256,7 +270,7 @@ class _FolderDetailScreenState extends State<FolderDetailScreen> {
                         return _FolderAssetCard(
                           item: detail.items[index],
                           thumbnailService: _thumbnailService,
-                          onTap: () => _openAssetDetail(detail.items[index]),
+                          onTap: () => _openAssetDetail(detail.items, index),
                         );
                       }, childCount: detail.items.length),
                       gridDelegate:

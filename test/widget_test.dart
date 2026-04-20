@@ -7,12 +7,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter_v1/application/models/home_cell_preview.dart';
 import 'package:hive_flutter_v1/application/models/home_dashboard_snapshot.dart';
 import 'package:hive_flutter_v1/application/models/asset_mapping_explanation.dart';
+import 'package:hive_flutter_v1/application/models/asset_preview_data.dart';
 import 'package:hive_flutter_v1/application/models/classification_outcome.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_snapshot.dart';
 import 'package:hive_flutter_v1/application/models/folder_detail_item.dart';
 import 'package:hive_flutter_v1/application/models/hive_cell_category.dart';
 import 'package:hive_flutter_v1/application/models/media_album.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
+import 'package:hive_flutter_v1/application/services/asset_preview_service.dart';
 import 'package:hive_flutter_v1/application/services/folder_detail_service.dart';
 import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
 import 'package:hive_flutter_v1/application/services/manual_recategorization_service.dart';
@@ -29,6 +31,7 @@ import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
 import 'package:hive_flutter_v1/presentation/screens/folder_detail_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
+import 'package:hive_flutter_v1/presentation/screens/scan_progress_screen.dart';
 import 'package:hive_flutter_v1/presentation/theme/app_theme.dart';
 
 void main() {
@@ -86,6 +89,7 @@ void main() {
           homeDashboardService: _FakeHomeDashboardService(),
           createFolderDetailService: _FakeFolderDetailService.new,
           createThumbnailService: _FakeThumbnailService.new,
+          createAssetPreviewService: _FakeAssetPreviewService.new,
           settingsService: InMemorySettingsService(),
         ),
       ),
@@ -104,17 +108,15 @@ void main() {
     expect(find.text('IMG_0001.HEIC'), findsOneWidget);
 
     await tester.tap(find.text('IMG_0001.HEIC'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('Asset Detail'), findsOneWidget);
+    expect(find.text('Asset Viewer'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
     expect(find.text('Why This Landed Here'), findsOneWidget);
+    expect(find.text('Browse this cell'), findsOneWidget);
+    expect(find.text('1 of 2'), findsWidgets);
 
-    await tester.drag(
-      find.byType(CustomScrollView).last,
-      const Offset(0, -260),
-    );
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Why This Landed Here'));
     await tester.pumpAndSettle();
 
@@ -162,6 +164,42 @@ void main() {
     expect(find.text('3 of 8'), findsOneWidget);
   });
 
+  testWidgets('ScanProgressScreen shows polished completion actions', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: ScanProgressScreen(
+          scanScope: const ScanScope.album(
+            albumId: 'album_summer',
+            albumName: 'Summer Roll',
+          ),
+          scanCoordinator: _FakeCompletedScanCoordinator(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan complete'), findsOneWidget);
+    expect(find.text('Your cells are ready to review.'), findsOneWidget);
+    expect(find.text('Completion Summary'), findsOneWidget);
+    expect(find.text('Scanned assets'), findsOneWidget);
+    expect(find.text('Generated cells'), findsOneWidget);
+    expect(find.text('Scope'), findsOneWidget);
+    expect(find.text('Summer Roll'), findsWidgets);
+    expect(find.text('View Results'), findsWidgets);
+    expect(find.text('Rescan'), findsOneWidget);
+    expect(find.text('Change Scope'), findsOneWidget);
+  });
+
   testWidgets('HomeScreen can reuse the last remembered scan scope', (
     WidgetTester tester,
   ) async {
@@ -203,6 +241,79 @@ void main() {
     expect(find.text('Scope • Summer Roll'), findsOneWidget);
   });
 
+  testWidgets('HomeScreen shows a polished first-scan empty state', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: HomeScreen(
+          homeDashboardService: _FakeHomeDashboardService(
+            snapshot: const HomeDashboardSnapshot(
+              totalAssetCount: 0,
+              totalCellCount: 0,
+              lastCompletedScanAt: null,
+              visibleCells: [],
+              hasCompletedScan: false,
+              meaningfulCellCount: 0,
+            ),
+          ),
+          settingsService: InMemorySettingsService(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Your first HIVE scan starts here'), findsOneWidget);
+    expect(find.text('Start Your First Scan'), findsOneWidget);
+    expect(find.text('Ready for your first result'), findsOneWidget);
+  });
+
+  testWidgets('HomeScreen shows a polished weak-results empty state', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: HomeScreen(
+          homeDashboardService: _FakeHomeDashboardService(
+            snapshot: HomeDashboardSnapshot(
+              totalAssetCount: 42,
+              totalCellCount: 1,
+              lastCompletedScanAt: DateTime.now(),
+              visibleCells: const [],
+              hasCompletedScan: true,
+              meaningfulCellCount: 0,
+            ),
+          ),
+          settingsService: InMemorySettingsService(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('This scan finished, but the cells need a stronger pass'),
+      findsOneWidget,
+    );
+    expect(find.text('Rescan'), findsOneWidget);
+    expect(find.text('Ready for another clean pass'), findsOneWidget);
+  });
+
   testWidgets('FolderDetailScreen can move an asset into another cell', (
     WidgetTester tester,
   ) async {
@@ -232,6 +343,7 @@ void main() {
           folderDetailService: folderDetailService,
           manualRecategorizationService: manualRecategorizationService,
           thumbnailService: _FakeThumbnailService(),
+          assetPreviewService: _FakeAssetPreviewService(),
         ),
       ),
     );
@@ -242,14 +354,8 @@ void main() {
     await tester.tap(find.text('IMG_0001.HEIC'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Asset Detail'), findsOneWidget);
+    expect(find.text('Asset Viewer'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
-
-    await tester.drag(
-      find.byType(CustomScrollView).last,
-      const Offset(0, -260),
-    );
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Move to Cell'));
     await tester.pumpAndSettle();
 
@@ -260,9 +366,7 @@ void main() {
     expect(find.textContaining('Moved to People'), findsOneWidget);
     expect(find.text('Manual placement'), findsOneWidget);
 
-    await tester.drag(find.byType(CustomScrollView).last, const Offset(0, 320));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.chevron_left_rounded));
+    await tester.tap(find.byIcon(Icons.chevron_left_rounded).first);
     await tester.pumpAndSettle();
 
     expect(find.text('No saved members yet'), findsOneWidget);
@@ -294,30 +398,40 @@ class _FakePermissionService implements PermissionService {
 }
 
 class _FakeHomeDashboardService implements HomeDashboardService {
+  _FakeHomeDashboardService({HomeDashboardSnapshot? snapshot})
+    : _snapshot = snapshot;
+
+  final HomeDashboardSnapshot? _snapshot;
+
   @override
   Future<HomeDashboardSnapshot> loadDashboard() async {
-    return HomeDashboardSnapshot(
-      totalAssetCount: 529,
-      totalCellCount: 12,
-      lastCompletedScanAt: DateTime.now().subtract(const Duration(hours: 2)),
-      visibleCells: const [
-        HomeCellPreview(
-          id: 'pets',
-          name: 'Pets',
-          assetCount: 128,
-          summary: 'Warm moments and familiar faces',
-          styleKey: 'pets',
-          featured: true,
-        ),
-        HomeCellPreview(
-          id: 'travel',
-          name: 'Travel',
-          assetCount: 84,
-          summary: 'Trips, weekends, and new places',
-          styleKey: 'travel',
-        ),
-      ],
-    );
+    return _snapshot ??
+        HomeDashboardSnapshot(
+          totalAssetCount: 529,
+          totalCellCount: 12,
+          lastCompletedScanAt: DateTime.now().subtract(
+            const Duration(hours: 2),
+          ),
+          hasCompletedScan: true,
+          meaningfulCellCount: 2,
+          visibleCells: const [
+            HomeCellPreview(
+              id: 'pets',
+              name: 'Pets',
+              assetCount: 128,
+              summary: 'Warm moments and familiar faces',
+              styleKey: 'pets',
+              featured: true,
+            ),
+            HomeCellPreview(
+              id: 'travel',
+              name: 'Travel',
+              assetCount: 84,
+              summary: 'Trips, weekends, and new places',
+              styleKey: 'travel',
+            ),
+          ],
+        );
   }
 }
 
@@ -347,6 +461,43 @@ class _FakeScanCoordinator implements ScanCoordinator {
       classifiedAssetCount: classifiedAssetCount,
       generatedCellCount: 1,
       currentStageLabel: 'Grouping moments into cells',
+      currentItemTitle: 'IMG_1042.JPG',
+      latestDetectedCellName: 'Pets',
+    );
+
+    _controller.add(run);
+    return run;
+  }
+
+  @override
+  Stream<ScanRun> watchActiveRun() => _controller.stream;
+}
+
+class _FakeCompletedScanCoordinator implements ScanCoordinator {
+  final StreamController<ScanRun> _controller =
+      StreamController<ScanRun>.broadcast();
+
+  @override
+  Future<void> cancelActiveRun() async {}
+
+  @override
+  Future<ScanRun?> getLatestRun() async {
+    return null;
+  }
+
+  @override
+  Future<ScanRun> startFullScan({
+    ScanScope scope = const ScanScope.allPhotos(),
+  }) async {
+    final run = ScanRun(
+      id: 'scan_complete',
+      status: ScanRunStatus.completed,
+      startedAt: DateTime.now().subtract(const Duration(minutes: 1)),
+      completedAt: DateTime.now(),
+      discoveredAssetCount: 8,
+      classifiedAssetCount: 8,
+      generatedCellCount: 3,
+      currentStageLabel: 'Finalizing cells',
       currentItemTitle: 'IMG_1042.JPG',
       latestDetectedCellName: 'Pets',
     );
@@ -457,6 +608,13 @@ class _FakeThumbnailService implements ThumbnailService {
   }
 }
 
+class _FakeAssetPreviewService implements AssetPreviewService {
+  @override
+  Future<AssetPreviewData?> loadPreview({required MediaAsset asset}) async {
+    return null;
+  }
+}
+
 FolderDetailSnapshot _buildFolderDetailSnapshot({
   required String cellId,
   required String cellName,
@@ -477,7 +635,7 @@ FolderDetailSnapshot _buildFolderDetailSnapshot({
     cellId: cellId,
     cellName: cellName,
     description: 'Real scan-backed assets grouped into this HIVE cell.',
-    totalCount: 1,
+    totalCount: 2,
     items: [
       FolderDetailItem(
         asset: MediaAsset(
@@ -501,6 +659,38 @@ FolderDetailSnapshot _buildFolderDetailSnapshot({
         ),
         classificationOutcome: ClassificationOutcome(
           assetId: 'asset_1',
+          status: ClassificationOutcomeStatus.succeeded,
+          labels: labels,
+          classificationRan: true,
+          imagePreparationSucceeded: true,
+          noLabelsReturned: false,
+          modelIdentifier: 'test',
+          sourceFormat: 'public.heic',
+          preparedFormat: 'normalized_cgimage',
+        ),
+      ),
+      FolderDetailItem(
+        asset: MediaAsset(
+          id: 'asset_2',
+          type: MediaAssetType.image,
+          createdAt: DateTime(2026, 4, 19),
+          modifiedAt: DateTime(2026, 4, 19),
+          width: 1600,
+          height: 1200,
+          originalFilename: 'IMG_0002.HEIC',
+        ),
+        title: 'IMG_0002.HEIC',
+        subtitle: 'Photo • 2026-04-19',
+        mappingExplanation: AssetMappingExplanation(
+          cellId: cellId,
+          cellName: cellName,
+          score: 0.78,
+          usedFallback: false,
+          topLabels: labels,
+          matchedKeywords: const ['animal'],
+        ),
+        classificationOutcome: ClassificationOutcome(
+          assetId: 'asset_2',
           status: ClassificationOutcomeStatus.succeeded,
           labels: labels,
           classificationRan: true,

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../application/models/media_album.dart';
 import '../../application/models/scan_scope.dart';
+import '../../application/services/asset_preview_service.dart';
 import '../../application/services/folder_detail_service.dart';
 import '../../application/models/home_dashboard_snapshot.dart';
 import '../../application/services/home_dashboard_service.dart';
@@ -14,6 +15,7 @@ import '../../data/services/persisted_folder_detail_service.dart';
 import '../../data/services/persisted_home_dashboard_service.dart';
 import '../../data/services/persisted_manual_recategorization_service.dart';
 import '../../data/services/local_settings_service.dart';
+import '../../data/services/photo_manager_asset_preview_service.dart';
 import '../../data/services/photo_manager_media_library_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../data/services/real_scan_coordinator.dart';
@@ -32,6 +34,7 @@ class HomeScreen extends StatefulWidget {
     this.createFolderDetailService,
     this.createManualRecategorizationService,
     this.createThumbnailService,
+    this.createAssetPreviewService,
     this.settingsService,
   });
 
@@ -42,6 +45,7 @@ class HomeScreen extends StatefulWidget {
   final ManualRecategorizationService Function()?
   createManualRecategorizationService;
   final ThumbnailService Function()? createThumbnailService;
+  final AssetPreviewService Function()? createAssetPreviewService;
   final SettingsService? settingsService;
 
   @override
@@ -129,8 +133,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) {
       return;
     }
-    await navigator.push(
-      MaterialPageRoute<void>(
+    final nextAction = await navigator.push<ScanProgressNextAction>(
+      MaterialPageRoute<ScanProgressNextAction>(
         builder: (_) => ScanProgressScreen(
           scanScope: scope,
           scanCoordinator:
@@ -147,6 +151,10 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _reloadDashboard();
     });
+
+    if (nextAction == ScanProgressNextAction.changeScope && mounted) {
+      await _chooseScanScope();
+    }
   }
 
   Future<void> _startPreferredScan() async {
@@ -211,6 +219,9 @@ class _HomeScreenState extends State<HomeScreen> {
           thumbnailService:
               widget.createThumbnailService?.call() ??
               const PhotoManagerThumbnailService(),
+          assetPreviewService:
+              widget.createAssetPreviewService?.call() ??
+              const PhotoManagerAssetPreviewService(),
         ),
       ),
     );
@@ -456,6 +467,37 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 18),
                     if (dashboard == null)
                       const _HomeLoadingState()
+                    else if (!dashboard.hasCompletedScan)
+                      _HomeEmptyState(
+                        title: 'Your first HIVE scan starts here',
+                        description:
+                            'Run one local-only pass to turn your accessible library into smart virtual cells without moving a single original asset.',
+                        actionLabel: _rememberedScope == null
+                            ? 'Start Your First Scan'
+                            : 'Use Last Scan Scope',
+                        onAction: _isLoadingRememberedScope
+                            ? null
+                            : _startPreferredScan,
+                        secondaryLabel: 'Choose Scope',
+                        onSecondary: _chooseScanScope,
+                        icon: Icons.hive_outlined,
+                      )
+                    else if (!dashboard.hasMeaningfulCells)
+                      _HomeEmptyState(
+                        title:
+                            'This scan finished, but the cells need a stronger pass',
+                        description:
+                            'Try a tighter scope, rerun the same slice, or use manual corrections to sharpen the next result.',
+                        actionLabel: _rememberedScope == null
+                            ? 'Rescan'
+                            : 'Use Last Scan Scope',
+                        onAction: _isLoadingRememberedScope
+                            ? null
+                            : _startPreferredScan,
+                        secondaryLabel: 'Change Scope',
+                        onSecondary: _chooseScanScope,
+                        icon: Icons.auto_awesome_mosaic_rounded,
+                      )
                     else
                       LayoutBuilder(
                         builder: (context, constraints) {
@@ -502,52 +544,17 @@ class _HomeScreenState extends State<HomeScreen> {
                         },
                       ),
                     const SizedBox(height: 22),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        color: HiveColors.surfaceElevated.withValues(
-                          alpha: 0.92,
-                        ),
-                        borderRadius: BorderRadius.circular(26),
-                        border: Border.all(color: HiveColors.outline),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            height: 42,
-                            width: 42,
-                            decoration: BoxDecoration(
-                              color: HiveColors.surfaceMuted,
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: const Icon(
-                              Icons.auto_awesome_rounded,
-                              size: 20,
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Ready for the scan foundation',
-                                  style: theme.textTheme.titleLarge,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'This shell is prepared for real asset counts, broader cells, and faster test scans from one chosen scope.',
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                    color: HiveColors.textSecondary,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
+                    _HomeFooterCard(
+                      title: dashboard == null
+                          ? 'Preparing your gallery surface'
+                          : dashboard.hasCompletedScan
+                          ? 'Ready for another clean pass'
+                          : 'Ready for your first result',
+                      description: dashboard == null
+                          ? 'HIVE is loading your latest local snapshot.'
+                          : dashboard.hasCompletedScan
+                          ? 'You can review results, rerun the same scope, or tighten the next scan for a cleaner set of cells.'
+                          : 'Once the first scan finishes, HIVE will surface your strongest local-only cells here.',
                     ),
                     const SizedBox(height: 42),
                   ],
@@ -950,6 +957,132 @@ class _RememberedScopeBanner extends StatelessWidget {
                 TextButton(onPressed: onUseLast, child: const Text('Use')),
               TextButton(onPressed: onChange, child: const Text('Change')),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HomeEmptyState extends StatelessWidget {
+  const _HomeEmptyState({
+    required this.title,
+    required this.description,
+    required this.actionLabel,
+    required this.icon,
+    this.onAction,
+    this.secondaryLabel,
+    this.onSecondary,
+  });
+
+  final String title;
+  final String description;
+  final String actionLabel;
+  final IconData icon;
+  final VoidCallback? onAction;
+  final String? secondaryLabel;
+  final VoidCallback? onSecondary;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: HiveColors.surfaceElevated.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 48,
+            width: 48,
+            decoration: BoxDecoration(
+              color: HiveColors.honey.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(icon, color: HiveColors.honey, size: 24),
+          ),
+          const SizedBox(height: 18),
+          Text(title, style: theme.textTheme.headlineSmall),
+          const SizedBox(height: 10),
+          Text(
+            description,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: HiveColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: onAction,
+              child: Text(actionLabel),
+            ),
+          ),
+          if (secondaryLabel != null && onSecondary != null) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                onPressed: onSecondary,
+                child: Text(secondaryLabel!),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HomeFooterCard extends StatelessWidget {
+  const _HomeFooterCard({required this.title, required this.description});
+
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: HiveColors.surfaceElevated.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 42,
+            width: 42,
+            decoration: BoxDecoration(
+              color: HiveColors.surfaceMuted,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(Icons.auto_awesome_rounded, size: 20),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 6),
+                Text(
+                  description,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: HiveColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

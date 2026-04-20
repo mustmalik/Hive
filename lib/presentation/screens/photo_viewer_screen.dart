@@ -1,12 +1,18 @@
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../application/models/asset_mapping_explanation.dart';
+import '../../application/models/asset_preview_data.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/folder_detail_item.dart';
 import '../../application/models/hive_cell_category.dart';
+import '../../application/services/asset_preview_service.dart';
 import '../../application/services/manual_recategorization_service.dart';
 import '../../application/services/thumbnail_service.dart';
 import '../../data/services/persisted_manual_recategorization_service.dart';
+import '../../data/services/photo_manager_asset_preview_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
 import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/media_asset.dart';
@@ -19,15 +25,21 @@ class PhotoViewerScreen extends StatefulWidget {
     required this.item,
     required this.originCellId,
     required this.originCellName,
+    this.items,
+    this.initialIndex = 0,
     this.manualRecategorizationService,
     this.thumbnailService,
+    this.assetPreviewService,
   });
 
   final FolderDetailItem item;
   final String originCellId;
   final String originCellName;
+  final List<FolderDetailItem>? items;
+  final int initialIndex;
   final ManualRecategorizationService? manualRecategorizationService;
   final ThumbnailService? thumbnailService;
+  final AssetPreviewService? assetPreviewService;
 
   @override
   State<PhotoViewerScreen> createState() => _PhotoViewerScreenState();
@@ -36,26 +48,13 @@ class PhotoViewerScreen extends StatefulWidget {
 class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   late final ManualRecategorizationService _manualRecategorizationService;
   late final ThumbnailService _thumbnailService;
-  late FolderDetailItem _item;
+  late final AssetPreviewService _assetPreviewService;
+  late List<FolderDetailItem> _items;
+  late int _currentIndex;
   bool _isApplyingMove = false;
   bool _didMutateMembership = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _manualRecategorizationService =
-        widget.manualRecategorizationService ??
-        PersistedManualRecategorizationService.standard();
-    _thumbnailService =
-        widget.thumbnailService ?? const PhotoManagerThumbnailService();
-    _item = widget.item;
-  }
-
-  List<HiveCellCategory> _targetCells() {
-    return _manualRecategorizationService.availableTargetCells
-        .where((cell) => cell.id != _currentCellId)
-        .toList(growable: false);
-  }
+  FolderDetailItem get _item => _items[_currentIndex];
 
   String get _currentCellId =>
       _item.mappingExplanation?.cellId ?? widget.originCellId;
@@ -66,8 +65,51 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   bool get _isManualOverride =>
       _item.mappingExplanation?.isManualOverride ?? false;
 
+  bool get _canGoPrevious => _currentIndex > 0;
+
+  bool get _canGoNext => _currentIndex < _items.length - 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _manualRecategorizationService =
+        widget.manualRecategorizationService ??
+        PersistedManualRecategorizationService.standard();
+    _thumbnailService =
+        widget.thumbnailService ?? const PhotoManagerThumbnailService();
+    _assetPreviewService =
+        widget.assetPreviewService ?? const PhotoManagerAssetPreviewService();
+    _items = List<FolderDetailItem>.from(widget.items ?? [widget.item]);
+    _currentIndex = widget.initialIndex.clamp(0, _items.length - 1);
+  }
+
+  List<HiveCellCategory> _targetCells() {
+    return _manualRecategorizationService.availableTargetCells
+        .where((cell) => cell.id != _currentCellId)
+        .toList(growable: false);
+  }
+
+  void _replaceCurrentItem(FolderDetailItem item) {
+    final nextItems = List<FolderDetailItem>.from(_items);
+    nextItems[_currentIndex] = item;
+    setState(() {
+      _items = nextItems;
+    });
+  }
+
   Future<void> _closeViewer() async {
     Navigator.of(context).pop(_didMutateMembership);
+  }
+
+  void _showNeighbor(int offset) {
+    final nextIndex = _currentIndex + offset;
+    if (nextIndex < 0 || nextIndex >= _items.length) {
+      return;
+    }
+
+    setState(() {
+      _currentIndex = nextIndex;
+    });
   }
 
   Future<void> _showExplanationSheet() {
@@ -347,9 +389,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
         return;
       }
 
-      setState(() {
-        _didMutateMembership = true;
-        _item = FolderDetailItem(
+      _replaceCurrentItem(
+        FolderDetailItem(
           asset: _item.asset,
           title: _item.title,
           subtitle: _item.subtitle,
@@ -366,7 +407,11 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
             matchedKeywords: const ['manual override'],
             isManualOverride: true,
           ),
-        );
+        ),
+      );
+
+      setState(() {
+        _didMutateMembership = true;
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -396,211 +441,268 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
         child: SafeArea(
           top: false,
           bottom: false,
-          child: CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              SliverToBoxAdapter(
+          child: Column(
+            children: [
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  IconButton(
+                    onPressed: _closeViewer,
+                    style: IconButton.styleFrom(
+                      backgroundColor: HiveColors.surface.withValues(
+                        alpha: 0.84,
+                      ),
+                      foregroundColor: HiveColors.textPrimary,
+                    ),
+                    icon: const Icon(Icons.chevron_left_rounded),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Asset Viewer',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            color: HiveColors.honey,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          _isApplyingMove
+                              ? 'Saving your local correction'
+                              : _item.subtitle,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: HiveColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_isApplyingMove)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: HiveColors.surface.withValues(alpha: 0.84),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: HiveColors.outline),
+                      ),
+                      child: const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.2),
+                      ),
+                    )
+                  else if (_items.length > 1)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: HiveColors.surface.withValues(alpha: 0.84),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: HiveColors.outline),
+                      ),
+                      child: Text(
+                        '${_currentIndex + 1} of ${_items.length}',
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          color: HiveColors.honey,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Expanded(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: _closeViewer,
-                          style: IconButton.styleFrom(
-                            backgroundColor: HiveColors.surface.withValues(
-                              alpha: 0.84,
-                            ),
-                            foregroundColor: HiveColors.textPrimary,
+                    Expanded(
+                      flex: 11,
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(32),
+                          gradient: const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [Color(0xFF382616), Color(0xFF201914)],
                           ),
-                          icon: const Icon(Icons.chevron_left_rounded),
+                          border: Border.all(color: HiveColors.outline),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x26000000),
+                              blurRadius: 24,
+                              offset: Offset(0, 16),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Asset Detail',
-                                style: theme.textTheme.titleLarge?.copyWith(
-                                  color: HiveColors.honey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: [
+                                _StatusChip(
+                                  label: _isManualOverride
+                                      ? 'Manual placement'
+                                      : 'Auto placement',
+                                  emphasized: _isManualOverride,
+                                ),
+                                _StatusChip(
+                                  label: 'Current Cell · $_currentCellName',
+                                  emphasized: true,
+                                ),
+                                if (_item.asset.isVideo)
+                                  const _StatusChip(label: 'Video preview'),
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                            Expanded(
+                              child: AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 260),
+                                switchInCurve: Curves.easeOutCubic,
+                                switchOutCurve: Curves.easeInCubic,
+                                child: _PreviewSurface(
+                                  key: ValueKey(_item.asset.id),
+                                  asset: _item.asset,
+                                  assetPreviewService: _assetPreviewService,
+                                  thumbnailService: _thumbnailService,
                                 ),
                               ),
-                              const SizedBox(height: 2),
-                              Text(
-                                _isApplyingMove
-                                    ? 'Saving your local correction'
-                                    : _item.subtitle,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  color: HiveColors.textSecondary,
+                            ),
+                            const SizedBox(height: 14),
+                            Text(
+                              _item.title,
+                              style: theme.textTheme.headlineSmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Pinch or double tap to zoom. HIVE keeps this view local-only and leaves the original Apple Photos asset untouched.',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: HiveColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (_items.length > 1) ...[
+                      const SizedBox(height: 14),
+                      _AdjacentAssetBar(
+                        currentIndex: _currentIndex,
+                        totalCount: _items.length,
+                        onPrevious: _canGoPrevious
+                            ? () => _showNeighbor(-1)
+                            : null,
+                        onNext: _canGoNext ? () => _showNeighbor(1) : null,
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    Expanded(
+                      flex: 9,
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _QuickActionTile(
+                                    title: 'Move to Cell',
+                                    subtitle:
+                                        'Correct placement and keep it there.',
+                                    icon: Icons.swap_horiz_rounded,
+                                    emphasized: true,
+                                    onTap: _showMoveSheet,
+                                  ),
                                 ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: _QuickActionTile(
+                                    title: 'Why This Landed Here',
+                                    subtitle:
+                                        'Open labels, signals, and confidence.',
+                                    icon: Icons.lightbulb_outline_rounded,
+                                    onTap: _showExplanationSheet,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 18),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(20),
+                              decoration: BoxDecoration(
+                                color: HiveColors.surfaceElevated.withValues(
+                                  alpha: 0.92,
+                                ),
+                                borderRadius: BorderRadius.circular(28),
+                                border: Border.all(color: HiveColors.outline),
                               ),
-                            ],
-                          ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Placement State',
+                                    style: theme.textTheme.titleLarge?.copyWith(
+                                      color: HiveColors.honey,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  _ExplanationRow(
+                                    label: 'Current Cell',
+                                    value: _currentCellName,
+                                  ),
+                                  _ExplanationRow(
+                                    label: 'Manual Override',
+                                    value: _isManualOverride ? 'Yes' : 'No',
+                                  ),
+                                  if (explanation != null)
+                                    _ExplanationRow(
+                                      label: 'Fallback Used',
+                                      value: explanation.usedFallback
+                                          ? 'Yes'
+                                          : 'No',
+                                    ),
+                                  if (explanation != null)
+                                    _ExplanationRow(
+                                      label: 'Match Score',
+                                      value: explanation.score.toStringAsFixed(
+                                        2,
+                                      ),
+                                    ),
+                                  if (_item.classificationOutcome != null)
+                                    _ExplanationRow(
+                                      label: 'Classification',
+                                      value: _classificationStatusLabel(
+                                        _item.classificationOutcome!,
+                                      ),
+                                    ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _isManualOverride
+                                        ? 'This asset will stay in $_currentCellName on future scans unless you move it again.'
+                                        : 'HIVE is currently relying on local labels and deterministic mapping to place this asset.',
+                                    style: theme.textTheme.bodyMedium?.copyWith(
+                                      color: HiveColors.textSecondary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 18),
+                          ],
                         ),
-                        if (_isApplyingMove)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 10,
-                            ),
-                            decoration: BoxDecoration(
-                              color: HiveColors.surface.withValues(alpha: 0.84),
-                              borderRadius: BorderRadius.circular(18),
-                              border: Border.all(color: HiveColors.outline),
-                            ),
-                            child: const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.2,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(32),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [Color(0xFF382616), Color(0xFF201914)],
-                        ),
-                        border: Border.all(color: HiveColors.outline),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x26000000),
-                            blurRadius: 24,
-                            offset: Offset(0, 16),
-                          ),
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _PreviewSurface(
-                            asset: _item.asset,
-                            thumbnailService: _thumbnailService,
-                          ),
-                          const SizedBox(height: 18),
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              _StatusChip(
-                                label: _isManualOverride
-                                    ? 'Manual placement'
-                                    : 'Auto placement',
-                                emphasized: _isManualOverride,
-                              ),
-                              _StatusChip(
-                                label: 'Current Cell · $_currentCellName',
-                                emphasized: true,
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            _item.title,
-                            style: theme.textTheme.headlineSmall,
-                          ),
-                          const SizedBox(height: 10),
-                          Text(
-                            'A local-only view of this Apple Photos asset with quick actions for correcting placement.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: HiveColors.textSecondary,
-                            ),
-                          ),
-                        ],
                       ),
                     ),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _QuickActionTile(
-                            title: 'Move to Cell',
-                            subtitle: 'Correct placement and keep it there.',
-                            icon: Icons.swap_horiz_rounded,
-                            emphasized: true,
-                            onTap: _showMoveSheet,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _QuickActionTile(
-                            title: 'Why This Landed Here',
-                            subtitle: 'Open labels, signals, and confidence.',
-                            icon: Icons.lightbulb_outline_rounded,
-                            onTap: _showExplanationSheet,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 18),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        color: HiveColors.surfaceElevated.withValues(
-                          alpha: 0.92,
-                        ),
-                        borderRadius: BorderRadius.circular(28),
-                        border: Border.all(color: HiveColors.outline),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Placement State',
-                            style: theme.textTheme.titleLarge?.copyWith(
-                              color: HiveColors.honey,
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                          _ExplanationRow(
-                            label: 'Current Cell',
-                            value: _currentCellName,
-                          ),
-                          _ExplanationRow(
-                            label: 'Manual Override',
-                            value: _isManualOverride ? 'Yes' : 'No',
-                          ),
-                          if (explanation != null)
-                            _ExplanationRow(
-                              label: 'Fallback Used',
-                              value: explanation.usedFallback ? 'Yes' : 'No',
-                            ),
-                          if (explanation != null)
-                            _ExplanationRow(
-                              label: 'Match Score',
-                              value: explanation.score.toStringAsFixed(2),
-                            ),
-                          if (_item.classificationOutcome != null)
-                            _ExplanationRow(
-                              label: 'Classification',
-                              value: _classificationStatusLabel(
-                                _item.classificationOutcome!,
-                              ),
-                            ),
-                          const SizedBox(height: 6),
-                          Text(
-                            _isManualOverride
-                                ? 'This asset will stay in $_currentCellName on future scans unless you move it again.'
-                                : 'HIVE is currently relying on local labels and deterministic mapping to place this asset.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: HiveColors.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 40),
                   ],
                 ),
               ),
@@ -651,58 +753,356 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   }
 }
 
-class _PreviewSurface extends StatelessWidget {
-  const _PreviewSurface({required this.asset, required this.thumbnailService});
+class _AdjacentAssetBar extends StatelessWidget {
+  const _AdjacentAssetBar({
+    required this.currentIndex,
+    required this.totalCount,
+    this.onPrevious,
+    this.onNext,
+  });
 
-  final MediaAsset asset;
-  final ThumbnailService thumbnailService;
+  final int currentIndex;
+  final int totalCount;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
 
   @override
   Widget build(BuildContext context) {
-    final aspectRatio = asset.width > 0 && asset.height > 0
-        ? asset.width / asset.height
-        : 1.0;
+    final theme = Theme.of(context);
 
-    return AspectRatio(
-      aspectRatio: aspectRatio.clamp(0.75, 1.4),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(28),
-        child: FutureBuilder(
-          future: thumbnailService.loadThumbnail(asset: asset, size: 1400),
-          builder: (context, snapshot) {
-            final bytes = snapshot.data;
-            if (bytes == null) {
-              return Container(
-                color: HiveColors.surfaceMuted,
-                child: Center(
-                  child: Icon(
-                    asset.isVideo
-                        ? Icons.play_circle_outline_rounded
-                        : Icons.photo_outlined,
-                    size: 56,
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: HiveColors.surfaceElevated.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Row(
+        children: [
+          _AdjacentButton(icon: Icons.chevron_left_rounded, onTap: onPrevious),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              children: [
+                Text(
+                  'Browse this cell',
+                  style: theme.textTheme.labelLarge?.copyWith(
                     color: HiveColors.honey,
                   ),
                 ),
-              );
-            }
+                const SizedBox(height: 4),
+                Text(
+                  '${currentIndex + 1} of $totalCount',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: HiveColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          _AdjacentButton(icon: Icons.chevron_right_rounded, onTap: onNext),
+        ],
+      ),
+    );
+  }
+}
+
+class _AdjacentButton extends StatelessWidget {
+  const _AdjacentButton({required this.icon, this.onTap});
+
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: onTap,
+      style: IconButton.styleFrom(
+        backgroundColor: HiveColors.surface.withValues(alpha: 0.82),
+        foregroundColor: onTap == null
+            ? HiveColors.textSecondary
+            : HiveColors.textPrimary,
+      ),
+      icon: Icon(icon),
+    );
+  }
+}
+
+class _PreviewSurface extends StatelessWidget {
+  const _PreviewSurface({
+    super.key,
+    required this.asset,
+    required this.assetPreviewService,
+    required this.thumbnailService,
+  });
+
+  final MediaAsset asset;
+  final AssetPreviewService assetPreviewService;
+  final ThumbnailService thumbnailService;
+
+  Future<_ResolvedPreview> _loadPreview() async {
+    final preview = await assetPreviewService.loadPreview(asset: asset);
+    if (preview != null && preview.hasDisplayableContent) {
+      return _ResolvedPreview(preview: preview);
+    }
+
+    final thumbnailBytes = await thumbnailService.loadThumbnail(
+      asset: asset,
+      size: 1600,
+    );
+    return _ResolvedPreview(thumbnailBytes: thumbnailBytes);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF120D09),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(28),
+        child: FutureBuilder<_ResolvedPreview>(
+          future: _loadPreview(),
+          builder: (context, snapshot) {
+            final resolvedPreview = snapshot.data;
+            final isLoading = snapshot.connectionState != ConnectionState.done;
 
             return Stack(
               fit: StackFit.expand,
               children: [
-                Image.memory(bytes, fit: BoxFit.cover),
-                const DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0x00000000), Color(0x4A000000)],
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  child: _ZoomablePreview(
+                    key: ValueKey(
+                      '${asset.id}_${resolvedPreview?.preview?.filePath}_${resolvedPreview?.thumbnailBytes?.length ?? 0}',
                     ),
+                    asset: asset,
+                    preview: resolvedPreview?.preview,
+                    thumbnailBytes: resolvedPreview?.thumbnailBytes,
+                  ),
+                ),
+                if (isLoading)
+                  const Align(
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      height: 26,
+                      width: 26,
+                      child: CircularProgressIndicator(strokeWidth: 2.4),
+                    ),
+                  ),
+                Positioned(
+                  left: 14,
+                  right: 14,
+                  bottom: 14,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      const _PreviewMetaChip(
+                        label: 'Pinch to zoom',
+                        icon: Icons.zoom_out_map_rounded,
+                      ),
+                      if (resolvedPreview?.preview?.isFullQuality ?? false)
+                        const _PreviewMetaChip(
+                          label: 'Full fidelity',
+                          icon: Icons.high_quality_rounded,
+                          emphasized: true,
+                        )
+                      else if (resolvedPreview?.preview?.sourceLabel != null)
+                        _PreviewMetaChip(
+                          label: resolvedPreview!.preview!.sourceLabel!,
+                          icon: Icons.image_outlined,
+                        ),
+                    ],
                   ),
                 ),
               ],
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+class _ZoomablePreview extends StatefulWidget {
+  const _ZoomablePreview({
+    super.key,
+    required this.asset,
+    this.preview,
+    this.thumbnailBytes,
+  });
+
+  final MediaAsset asset;
+  final AssetPreviewData? preview;
+  final Uint8List? thumbnailBytes;
+
+  @override
+  State<_ZoomablePreview> createState() => _ZoomablePreviewState();
+}
+
+class _ZoomablePreviewState extends State<_ZoomablePreview> {
+  final TransformationController _controller = TransformationController();
+  TapDownDetails? _doubleTapDetails;
+
+  @override
+  void didUpdateWidget(covariant _ZoomablePreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.asset.id != widget.asset.id) {
+      _controller.value = Matrix4.identity();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleDoubleTap() {
+    final details = _doubleTapDetails;
+    final currentScale = _controller.value.getMaxScaleOnAxis();
+
+    if (currentScale > 1.05 || details == null) {
+      _controller.value = Matrix4.identity();
+      return;
+    }
+
+    const scale = 2.5;
+    final position = details.localPosition;
+    final matrix = Matrix4.diagonal3Values(scale, scale, 1)
+      ..setTranslationRaw(
+        -position.dx * (scale - 1),
+        -position.dy * (scale - 1),
+        0,
+      );
+    _controller.value = matrix;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = widget.preview;
+    final bytes = preview?.bytes ?? widget.thumbnailBytes;
+
+    Widget child;
+    if (preview?.filePath != null) {
+      child = Image.file(
+        File(preview!.filePath!),
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.high,
+        errorBuilder: (_, _, _) => _PreviewFallback(asset: widget.asset),
+      );
+    } else if (bytes != null) {
+      child = Image.memory(
+        bytes,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.high,
+        errorBuilder: (_, _, _) => _PreviewFallback(asset: widget.asset),
+      );
+    } else {
+      child = _PreviewFallback(asset: widget.asset);
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return GestureDetector(
+          onDoubleTapDown: (details) => _doubleTapDetails = details,
+          onDoubleTap: _handleDoubleTap,
+          child: InteractiveViewer(
+            transformationController: _controller,
+            minScale: 1,
+            maxScale: 4,
+            panEnabled: true,
+            scaleEnabled: true,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: ColoredBox(
+                color: const Color(0xFF120D09),
+                child: Center(child: child),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PreviewFallback extends StatelessWidget {
+  const _PreviewFallback({required this.asset});
+
+  final MediaAsset asset;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF2E2117), Color(0xFF17110D)],
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          asset.isVideo
+              ? Icons.play_circle_outline_rounded
+              : Icons.photo_outlined,
+          size: 64,
+          color: HiveColors.honey,
+        ),
+      ),
+    );
+  }
+}
+
+class _PreviewMetaChip extends StatelessWidget {
+  const _PreviewMetaChip({
+    required this.label,
+    required this.icon,
+    this.emphasized = false,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: emphasized
+            ? HiveColors.honey.withValues(alpha: 0.16)
+            : const Color(0x990F0B08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: emphasized
+              ? HiveColors.honey.withValues(alpha: 0.28)
+              : HiveColors.outline,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 14,
+            color: emphasized ? HiveColors.honey : Colors.white,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: emphasized ? HiveColors.honey : Colors.white,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -918,4 +1318,11 @@ class _KeywordChip extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ResolvedPreview {
+  const _ResolvedPreview({this.preview, this.thumbnailBytes});
+
+  final AssetPreviewData? preview;
+  final Uint8List? thumbnailBytes;
 }

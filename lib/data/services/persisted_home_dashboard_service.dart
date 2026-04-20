@@ -5,9 +5,6 @@ import '../../application/repositories/media_asset_repository.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/home_dashboard_service.dart';
 import '../../application/services/media_library_service.dart';
-import '../repositories/in_memory_folder_cell_repository.dart';
-import '../repositories/in_memory_media_asset_repository.dart';
-import '../repositories/in_memory_scan_run_repository.dart';
 import '../repositories/local_folder_cell_repository.dart';
 import '../repositories/local_media_asset_repository.dart';
 import '../repositories/local_scan_run_repository.dart';
@@ -19,18 +16,15 @@ class PersistedHomeDashboardService implements HomeDashboardService {
     required MediaAssetRepository mediaAssetRepository,
     required FolderCellRepository folderCellRepository,
     required ScanRunRepository scanRunRepository,
-    required HomeDashboardService fallbackDashboardService,
     MediaLibraryService? mediaLibraryService,
   }) : _mediaAssetRepository = mediaAssetRepository,
        _folderCellRepository = folderCellRepository,
        _scanRunRepository = scanRunRepository,
-       _fallbackDashboardService = fallbackDashboardService,
        _mediaLibraryService = mediaLibraryService;
 
   final MediaAssetRepository _mediaAssetRepository;
   final FolderCellRepository _folderCellRepository;
   final ScanRunRepository _scanRunRepository;
-  final HomeDashboardService _fallbackDashboardService;
   final MediaLibraryService? _mediaLibraryService;
 
   factory PersistedHomeDashboardService.standard() {
@@ -40,7 +34,6 @@ class PersistedHomeDashboardService implements HomeDashboardService {
       mediaAssetRepository: LocalMediaAssetRepository(store: store),
       folderCellRepository: LocalFolderCellRepository(store: store),
       scanRunRepository: LocalScanRunRepository(store: store),
-      fallbackDashboardService: _FallbackHomeDashboardService(),
       mediaLibraryService: const PhotoManagerMediaLibraryService(),
     );
   }
@@ -103,17 +96,35 @@ class PersistedHomeDashboardService implements HomeDashboardService {
   @override
   Future<HomeDashboardSnapshot> loadDashboard() async {
     final cells = await _folderCellRepository.getAllCells();
-    if (cells.isEmpty) {
-      return _fallbackDashboardService.loadDashboard();
-    }
-
     final assets = await _mediaAssetRepository.getAllAssets();
     final latestRun = await _scanRunRepository.getLatestRun();
     final totalAssetCount = await _resolveTotalAssetCount(
       fallbackCount: assets.length,
     );
+    if (cells.isEmpty) {
+      if (latestRun == null) {
+        return HomeDashboardSnapshot(
+          totalAssetCount: totalAssetCount,
+          totalCellCount: 0,
+          lastCompletedScanAt: null,
+          visibleCells: const [],
+          hasCompletedScan: false,
+          meaningfulCellCount: 0,
+        );
+      }
+
+      return HomeDashboardSnapshot(
+        totalAssetCount: totalAssetCount,
+        totalCellCount: 0,
+        lastCompletedScanAt: latestRun.completedAt,
+        visibleCells: const [],
+        hasCompletedScan: latestRun.completedAt != null,
+        meaningfulCellCount: 0,
+      );
+    }
 
     final visibleCells = <HomeCellPreview>[];
+    var meaningfulCellCount = 0;
 
     for (final cell in cells) {
       final preview =
@@ -134,6 +145,10 @@ class PersistedHomeDashboardService implements HomeDashboardService {
           featured: preview.featured,
         ),
       );
+
+      if (cell.assetCount > 0 && cell.name != 'Unsorted') {
+        meaningfulCellCount += 1;
+      }
     }
 
     return HomeDashboardSnapshot(
@@ -141,6 +156,8 @@ class PersistedHomeDashboardService implements HomeDashboardService {
       totalCellCount: cells.length,
       lastCompletedScanAt: latestRun?.completedAt,
       visibleCells: visibleCells,
+      hasCompletedScan: latestRun?.completedAt != null,
+      meaningfulCellCount: meaningfulCellCount,
     );
   }
 
@@ -156,44 +173,5 @@ class PersistedHomeDashboardService implements HomeDashboardService {
     } catch (_) {
       return fallbackCount;
     }
-  }
-}
-
-class _FallbackHomeDashboardService implements HomeDashboardService {
-  _FallbackHomeDashboardService()
-    : _mediaAssetRepository = InMemoryMediaAssetRepository.seeded(),
-      _folderCellRepository = InMemoryFolderCellRepository.seeded(),
-      _scanRunRepository = InMemoryScanRunRepository.seeded();
-
-  final MediaAssetRepository _mediaAssetRepository;
-  final FolderCellRepository _folderCellRepository;
-  final ScanRunRepository _scanRunRepository;
-
-  @override
-  Future<HomeDashboardSnapshot> loadDashboard() async {
-    final cells = await _folderCellRepository.getAllCells();
-    final latestRun = await _scanRunRepository.getLatestRun();
-    final assets = await _mediaAssetRepository.getAllAssets();
-
-    final visibleCells = cells
-        .take(5)
-        .map((cell) {
-          return HomeCellPreview(
-            id: cell.id,
-            name: cell.name,
-            assetCount: cell.assetCount,
-            summary: 'A premium preview of your next organization layer.',
-            styleKey: cell.name.toLowerCase(),
-            featured: cell.name == 'Pets' || cell.name == 'Basketball',
-          );
-        })
-        .toList(growable: false);
-
-    return HomeDashboardSnapshot(
-      totalAssetCount: assets.length,
-      totalCellCount: cells.length,
-      lastCompletedScanAt: latestRun?.completedAt,
-      visibleCells: visibleCells,
-    );
   }
 }
