@@ -32,10 +32,93 @@ import 'package:hive_flutter_v1/main.dart';
 import 'package:hive_flutter_v1/presentation/screens/folder_detail_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/scan_progress_screen.dart';
+import 'package:hive_flutter_v1/presentation/screens/splash_screen.dart';
 import 'package:hive_flutter_v1/presentation/theme/app_theme.dart';
 
 void main() {
-  testWidgets('HIVE flows from splash to onboarding to permission', (
+  test('launch resolver sends first launch to onboarding', () {
+    expect(
+      resolveHiveLaunchDestination(
+        settings: const AppSettings(),
+        permissionStatus: PhotoPermissionStatus.notRequested,
+      ),
+      HiveLaunchDestination.onboarding,
+    );
+  });
+
+  test('launch resolver sends completed onboarding with access to home', () {
+    expect(
+      resolveHiveLaunchDestination(
+        settings: const AppSettings(hasCompletedOnboarding: true),
+        permissionStatus: PhotoPermissionStatus.fullAccess,
+      ),
+      HiveLaunchDestination.home,
+    );
+    expect(
+      resolveHiveLaunchDestination(
+        settings: const AppSettings(hasCompletedOnboarding: true),
+        permissionStatus: PhotoPermissionStatus.limited,
+      ),
+      HiveLaunchDestination.home,
+    );
+  });
+
+  test(
+    'launch resolver sends completed onboarding without access to permission',
+    () {
+      expect(
+        resolveHiveLaunchDestination(
+          settings: const AppSettings(hasCompletedOnboarding: true),
+          permissionStatus: PhotoPermissionStatus.notRequested,
+        ),
+        HiveLaunchDestination.permission,
+      );
+      expect(
+        resolveHiveLaunchDestination(
+          settings: const AppSettings(hasCompletedOnboarding: true),
+          permissionStatus: PhotoPermissionStatus.denied,
+        ),
+        HiveLaunchDestination.permission,
+      );
+    },
+  );
+
+  testWidgets('HIVE shows onboarding once and persists completion', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final settingsService = InMemorySettingsService();
+
+    await tester.pumpWidget(
+      HiveApp(
+        permissionService: const _FakePermissionService(),
+        settingsService: settingsService,
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Introduction'), findsOneWidget);
+    expect(find.text('Get Started'), findsNothing);
+    await tester.tap(find.text('Skip'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Privacy & Access'), findsOneWidget);
+    expect(find.text('Let HIVE organize locally.'), findsOneWidget);
+    expect(find.text('Allow Photo Access'), findsOneWidget);
+    expect(
+      (await settingsService.loadSettings()).hasCompletedOnboarding,
+      isTrue,
+    );
+  });
+
+  testWidgets('completed onboarding launches directly to permission recovery', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(430, 932);
@@ -46,30 +129,21 @@ void main() {
     });
 
     await tester.pumpWidget(
-      const HiveApp(permissionService: _FakePermissionService()),
+      HiveApp(
+        permissionService: const _FakePermissionService(
+          currentStatus: PhotoPermissionStatus.denied,
+        ),
+        settingsService: InMemorySettingsService(
+          initialSettings: const AppSettings(hasCompletedOnboarding: true),
+        ),
+      ),
     );
-
-    expect(find.text('HIVE'), findsOneWidget);
-    expect(find.text('Get Started'), findsOneWidget);
-
-    await tester.tap(find.text('Get Started'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Introduction'), findsOneWidget);
-    expect(find.text('Continue'), findsOneWidget);
-
-    await tester.tap(find.text('Continue'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Continue'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Privacy & Access'));
+    await tester.pump();
     await tester.pumpAndSettle();
 
     expect(find.text('Privacy & Access'), findsOneWidget);
-    expect(find.text('Let HIVE organize locally.'), findsOneWidget);
-    expect(find.text('Allow Photo Access'), findsOneWidget);
+    expect(find.text('Photos access is currently off.'), findsOneWidget);
+    expect(find.text('Introduction'), findsNothing);
   });
 
   testWidgets('HomeScreen cell tap opens folder detail', (
@@ -376,11 +450,15 @@ void main() {
 }
 
 class _FakePermissionService implements PermissionService {
-  const _FakePermissionService();
+  const _FakePermissionService({
+    this.currentStatus = PhotoPermissionStatus.notRequested,
+  });
+
+  final PhotoPermissionStatus currentStatus;
 
   @override
   Future<PhotoPermissionStatus> getPhotoPermissionStatus() async {
-    return PhotoPermissionStatus.notRequested;
+    return currentStatus;
   }
 
   @override

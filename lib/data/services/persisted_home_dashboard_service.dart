@@ -60,7 +60,17 @@ class PersistedHomeDashboardService implements HomeDashboardService {
       styleKey: 'travel',
       featured: false,
     ),
+    'Places': (
+      summary: 'Scenery, venues, skylines, and memorable locations',
+      styleKey: 'places',
+      featured: false,
+    ),
     'Food': (summary: 'Plates worth saving', styleKey: 'food', featured: false),
+    'Videos': (
+      summary: 'Clips, motion moments, and moving memories',
+      styleKey: 'videos',
+      featured: false,
+    ),
     'Screenshots': (
       summary: 'Captured references and saved screens',
       styleKey: 'screenshots',

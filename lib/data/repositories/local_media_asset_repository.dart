@@ -58,6 +58,7 @@ class LocalMediaAssetRepository implements MediaAssetRepository {
     );
   }
 
+  @override
   Future<void> replaceAll(List<MediaAsset> assets) async {
     final snapshot = await _store.read();
     await _store.write(

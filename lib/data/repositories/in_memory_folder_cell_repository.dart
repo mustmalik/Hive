@@ -45,6 +45,13 @@ class InMemoryFolderCellRepository implements FolderCellRepository {
     }
   }
 
+  @override
+  Future<void> replaceAll(List<FolderCell> cells) async {
+    _cells
+      ..clear()
+      ..addAll(cells);
+  }
+
   static List<FolderCell> _defaultCells() {
     final now = DateTime.now();
 

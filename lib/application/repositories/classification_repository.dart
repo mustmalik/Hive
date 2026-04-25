@@ -4,6 +4,8 @@ import '../../domain/entities/classification_label.dart';
 abstract interface class ClassificationRepository {
   Future<void> saveOutcome(ClassificationOutcome outcome);
 
+  Future<void> saveOutcomes(Iterable<ClassificationOutcome> outcomes);
+
   Future<Map<String, ClassificationOutcome>> getOutcomesForAssetIds(
     List<String> assetIds,
   );

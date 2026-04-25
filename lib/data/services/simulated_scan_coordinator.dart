@@ -38,7 +38,7 @@ class SimulatedScanCoordinator implements ScanCoordinator {
   static const List<String> _detectedCells = [
     'People',
     'Pets',
-    'Travel',
+    'Places',
     'Food',
     'Sports',
     'Unsorted',

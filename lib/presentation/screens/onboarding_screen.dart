@@ -1,15 +1,22 @@
 import 'package:flutter/material.dart';
 
 import '../../application/services/permission_service.dart';
+import '../../application/services/settings_service.dart';
+import '../../data/services/local_settings_service.dart';
 import 'permission_screen.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 import '../widgets/onboarding_page_indicator.dart';
 
 class OnboardingScreen extends StatefulWidget {
-  const OnboardingScreen({super.key, this.permissionService});
+  const OnboardingScreen({
+    super.key,
+    this.permissionService,
+    this.settingsService,
+  });
 
   final PermissionService? permissionService;
+  final SettingsService? settingsService;
 
   @override
   State<OnboardingScreen> createState() => _OnboardingScreenState();
@@ -49,11 +56,24 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     super.dispose();
   }
 
-  void _goToPermission() {
-    Navigator.of(context).push(
+  Future<void> _goToPermission() async {
+    final settingsService =
+        widget.settingsService ?? LocalSettingsService.standard();
+    final currentSettings = await settingsService.loadSettings();
+    await settingsService.saveSettings(
+      currentSettings.copyWith(hasCompletedOnboarding: true),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    await Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            PermissionScreen(permissionService: widget.permissionService),
+        builder: (_) => PermissionScreen(
+          permissionService: widget.permissionService,
+          settingsService: settingsService,
+        ),
       ),
     );
   }

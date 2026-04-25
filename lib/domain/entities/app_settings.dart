@@ -4,6 +4,7 @@ enum ThumbnailQuality { compact, balanced, detailed }
 
 class AppSettings {
   const AppSettings({
+    this.hasCompletedOnboarding = false,
     this.scanImages = true,
     this.scanVideos = true,
     this.allowSuggestedCells = true,
@@ -13,6 +14,7 @@ class AppSettings {
     this.lastUsedScanScope,
   });
 
+  final bool hasCompletedOnboarding;
   final bool scanImages;
   final bool scanVideos;
   final bool allowSuggestedCells;
@@ -22,6 +24,7 @@ class AppSettings {
   final ScanScope? lastUsedScanScope;
 
   AppSettings copyWith({
+    bool? hasCompletedOnboarding,
     bool? scanImages,
     bool? scanVideos,
     bool? allowSuggestedCells,
@@ -33,6 +36,8 @@ class AppSettings {
     bool clearLastUsedScanScope = false,
   }) {
     return AppSettings(
+      hasCompletedOnboarding:
+          hasCompletedOnboarding ?? this.hasCompletedOnboarding,
       scanImages: scanImages ?? this.scanImages,
       scanVideos: scanVideos ?? this.scanVideos,
       allowSuggestedCells: allowSuggestedCells ?? this.allowSuggestedCells,

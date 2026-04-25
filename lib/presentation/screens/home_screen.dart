@@ -604,9 +604,17 @@ class _HomeScreenState extends State<HomeScreen> {
         color: Color(0xFFF0C777),
         icon: Icons.flight_takeoff_rounded,
       ),
+      'places' => const _HomeCellStyle(
+        color: Color(0xFFD6B36C),
+        icon: Icons.landscape_rounded,
+      ),
       'food' => const _HomeCellStyle(
         color: Color(0xFFC88538),
         icon: Icons.restaurant_rounded,
+      ),
+      'videos' => const _HomeCellStyle(
+        color: Color(0xFFD69A58),
+        icon: Icons.videocam_rounded,
       ),
       'screenshots' => const _HomeCellStyle(
         color: Color(0xFFBCA078),

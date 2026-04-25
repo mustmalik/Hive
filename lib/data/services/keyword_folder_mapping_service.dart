@@ -67,6 +67,102 @@ class KeywordFolderMappingService implements FolderMappingService {
     'friends',
   };
 
+  static const Set<String> _directPetCueKeywords = {
+    'dog',
+    'dogs',
+    'puppy',
+    'canine',
+    'pet',
+    'pets',
+    'domestic dog',
+    'golden retriever',
+    'retriever',
+    'cat',
+    'cats',
+    'kitten',
+    'feline',
+    'domestic cat',
+  };
+
+  static const Set<String> _foodCueKeywords = {
+    'food',
+    'meal',
+    'dish',
+    'dessert',
+    'drink',
+    'beverage',
+    'cuisine',
+    'pizza',
+    'burger',
+    'pasta',
+    'salad',
+    'bread',
+    'fruit',
+    'vegetable',
+    'produce',
+    'plate',
+    'restaurant',
+    'coffee',
+    'breakfast',
+    'lunch',
+    'dinner',
+    'brunch',
+    'sushi',
+    'cake',
+  };
+
+  static const Set<String> _placeFilenameKeywords = {
+    'sunset',
+    'sunrise',
+    'landscape',
+    'skyline',
+    'mountain',
+    'beach',
+    'park',
+    'venue',
+  };
+
+  static const Set<String> _placeCueKeywords = {
+    'landscape',
+    'nature',
+    'scenery',
+    'outdoor',
+    'outdoors',
+    'sky',
+    'cloud',
+    'sunset',
+    'sunrise',
+    'horizon',
+    'beach',
+    'ocean',
+    'sea',
+    'coast',
+    'mountain',
+    'hill',
+    'forest',
+    'park',
+    'garden',
+    'lake',
+    'river',
+    'waterfall',
+    'city',
+    'skyline',
+    'street',
+    'building',
+    'architecture',
+    'bridge',
+    'house',
+    'venue',
+    'stadium',
+    'arena',
+    'courtyard',
+    'plaza',
+    'temple',
+    'church',
+    'tower',
+    'landmark',
+  };
+
   static const Set<String> _screenshotFilenameKeywords = {
     'screenshot',
     'screen shot',
@@ -93,6 +189,56 @@ class KeywordFolderMappingService implements FolderMappingService {
     'chat',
     'social media',
     'display',
+  };
+
+  static const Set<String> _documentFilenameKeywords = {
+    'receipt',
+    'invoice',
+    'document',
+    'statement',
+    'form',
+    'passport',
+    'license',
+    'certificate',
+    'scan',
+  };
+
+  static const Set<String> _documentCueKeywords = {
+    'document',
+    'text',
+    'paper',
+    'receipt',
+    'invoice',
+    'bill',
+    'form',
+    'letter',
+    'menu',
+    'certificate',
+    'page',
+    'poster',
+    'passport',
+    'passport card',
+    'id card',
+    'identity card',
+    'identification card',
+    'driver license',
+    'drivers license',
+    'license',
+    'visa',
+    'badge',
+  };
+
+  static const Set<String> _identityDocumentCueKeywords = {
+    'passport',
+    'passport card',
+    'id card',
+    'identity card',
+    'identification card',
+    'driver license',
+    'drivers license',
+    'license',
+    'visa',
+    'badge',
   };
 
   static const Set<String> _animationCueKeywords = {
@@ -215,10 +361,6 @@ class KeywordFolderMappingService implements FolderMappingService {
         'canine',
         'pet',
         'pets',
-        'animal',
-        'mammal',
-        'domestic animal',
-        'companion animal',
         'domestic dog',
         'golden retriever',
         'retriever',
@@ -228,7 +370,7 @@ class KeywordFolderMappingService implements FolderMappingService {
         'feline',
         'domestic cat',
       },
-      priorityBias: 0.14,
+      priorityBias: 0.08,
     ),
     _CellRule(
       cellId: 'travel',
@@ -240,21 +382,64 @@ class KeywordFolderMappingService implements FolderMappingService {
         'vacation',
         'tourism',
         'tourist',
-        'beach',
-        'ocean',
-        'mountain',
-        'landscape',
-        'city',
-        'skyline',
-        'bridge',
         'airplane',
         'aircraft',
         'airport',
         'hotel',
         'road trip',
         'destination',
+        'luggage',
+        'suitcase',
+        'terminal',
+      },
+      priorityBias: 0.05,
+    ),
+    _CellRule(
+      cellId: 'places',
+      cellName: 'Places',
+      description: 'Scenery, venues, skylines, and memorable locations',
+      styleKey: 'places',
+      keywords: {
+        'landscape',
+        'nature',
+        'scenery',
+        'outdoor',
+        'outdoors',
+        'sky',
+        'cloud',
+        'sunset',
+        'sunrise',
+        'horizon',
+        'beach',
+        'ocean',
+        'sea',
+        'coast',
+        'mountain',
+        'hill',
+        'forest',
+        'park',
+        'garden',
+        'lake',
+        'river',
+        'waterfall',
+        'city',
+        'skyline',
+        'street',
+        'building',
+        'architecture',
+        'bridge',
+        'house',
+        'venue',
+        'stadium',
+        'arena',
+        'courtyard',
+        'plaza',
+        'temple',
+        'church',
+        'tower',
         'landmark',
       },
+      priorityBias: 0.08,
     ),
     _CellRule(
       cellId: 'food',
@@ -281,6 +466,14 @@ class KeywordFolderMappingService implements FolderMappingService {
         'restaurant',
         'coffee',
       },
+    ),
+    _CellRule(
+      cellId: 'videos',
+      cellName: 'Videos',
+      description: 'Clips, motion moments, and moving memories',
+      styleKey: 'videos',
+      keywords: {'video', 'movie', 'recording', 'clip'},
+      assetTypes: {MediaAssetType.video},
     ),
     _CellRule(
       cellId: 'screenshots',
@@ -560,6 +753,18 @@ class KeywordFolderMappingService implements FolderMappingService {
         .take(_maxExplanationLabels)
         .toList(growable: false);
 
+    if (asset.type == MediaAssetType.video) {
+      final videoRule = _ruleForCellId('videos')!;
+      return AssetMappingExplanation(
+        cellId: videoRule.cellId,
+        cellName: videoRule.cellName,
+        score: 1.35,
+        usedFallback: false,
+        topLabels: topLabels,
+        matchedKeywords: [asset.type.name, 'video asset'],
+      );
+    }
+
     if (topLabels.isEmpty && asset.type != MediaAssetType.screenshot) {
       return AssetMappingExplanation(
         cellId: _unsortedRule.cellId,
@@ -719,6 +924,26 @@ class KeywordFolderMappingService implements FolderMappingService {
         cueSummary: cueSummary,
         matchedKeywords: matchedKeywords,
       ),
+      'pets' => _petsBoost(
+        cueSummary: cueSummary,
+        matchedKeywords: matchedKeywords,
+      ),
+      'places' => _placesBoost(
+        cueSummary: cueSummary,
+        normalizedFilename: normalizedFilename,
+        filenameTokens: filenameTokens,
+        matchedKeywords: matchedKeywords,
+      ),
+      'food' => _foodBoost(
+        cueSummary: cueSummary,
+        matchedKeywords: matchedKeywords,
+      ),
+      'documents_receipts' => _documentBoost(
+        cueSummary: cueSummary,
+        normalizedFilename: normalizedFilename,
+        filenameTokens: filenameTokens,
+        matchedKeywords: matchedKeywords,
+      ),
       'screenshots' => _screenshotBoost(
         asset: asset,
         cueSummary: cueSummary,
@@ -758,6 +983,17 @@ class KeywordFolderMappingService implements FolderMappingService {
       matchedKeywords.add('filename family');
     }
 
+    if (cueSummary.documentCueStrength >= cueSummary.familyCueStrength + 0.18) {
+      bonus -= 0.52;
+      matchedKeywords.add('document signal suppresses family');
+    }
+
+    if (cueSummary.screenshotCueStrength >=
+        cueSummary.familyCueStrength + 0.18) {
+      bonus -= 0.44;
+      matchedKeywords.add('screen signal suppresses family');
+    }
+
     return bonus;
   }
 
@@ -780,6 +1016,184 @@ class KeywordFolderMappingService implements FolderMappingService {
     if (cueSummary.crowdCueCount > 0) {
       bonus += 0.16;
       matchedKeywords.add('crowd or group');
+    }
+
+    if (cueSummary.peopleCueCount >= 2) {
+      bonus += 0.22;
+      matchedKeywords.add('strong human cluster');
+    }
+
+    if (cueSummary.peopleCueStrength >= 1.2) {
+      bonus += 0.24;
+      matchedKeywords.add('confident people cluster');
+    }
+
+    if (cueSummary.identityDocumentCueCount > 0) {
+      bonus -= 0.78;
+      matchedKeywords.add('identity document suppresses people');
+    } else if (cueSummary.documentCueStrength >=
+        cueSummary.peopleCueStrength + 0.12) {
+      bonus -= 0.56;
+      matchedKeywords.add('document signal suppresses people');
+    }
+
+    if (cueSummary.screenshotCueStrength >=
+        cueSummary.peopleCueStrength + 0.12) {
+      bonus -= 0.52;
+      matchedKeywords.add('screen signal suppresses people');
+    }
+
+    return bonus;
+  }
+
+  double _petsBoost({
+    required _CueSummary cueSummary,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.directPetCueCount > 0) {
+      bonus += 0.18 + (cueSummary.directPetCueCount * 0.08);
+      matchedKeywords.add('pet cue');
+    }
+
+    if (cueSummary.directPetCueStrength >= 1.05) {
+      bonus += 0.16;
+      matchedKeywords.add('strong pet cluster');
+    }
+
+    if (cueSummary.placeCueStrength >= cueSummary.directPetCueStrength + 0.18) {
+      bonus -= 0.42;
+      matchedKeywords.add('place signal suppresses pets');
+    }
+
+    if (cueSummary.foodCueStrength >= cueSummary.directPetCueStrength + 0.18) {
+      bonus -= 0.42;
+      matchedKeywords.add('food signal suppresses pets');
+    }
+
+    if (cueSummary.peopleCueStrength >=
+            cueSummary.directPetCueStrength + 0.24 &&
+        cueSummary.directPetCueCount < 2) {
+      bonus -= 0.24;
+      matchedKeywords.add('people signal suppresses weak pet');
+    }
+
+    return bonus;
+  }
+
+  double _placesBoost({
+    required _CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+    var hasPlaceSignal = false;
+
+    if (_matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: _placeFilenameKeywords,
+    )) {
+      bonus += 0.34;
+      matchedKeywords.add('filename place');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.placeCueCount > 0) {
+      bonus += 0.22 + (cueSummary.placeCueCount * 0.08);
+      matchedKeywords.add('place cue');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.placeCueStrength >= 1.1) {
+      bonus += 0.22;
+      matchedKeywords.add('strong place cluster');
+      hasPlaceSignal = true;
+    }
+
+    if (hasPlaceSignal && cueSummary.peopleCueCount == 0) {
+      bonus += 0.16;
+      matchedKeywords.add('no dominant person');
+    }
+
+    if (cueSummary.peopleCueStrength >= cueSummary.placeCueStrength + 0.18 &&
+        cueSummary.peopleCueCount > 0) {
+      bonus -= 0.38;
+      matchedKeywords.add('people signal suppresses place');
+    } else if (cueSummary.placeCueStrength >=
+        cueSummary.peopleCueStrength + 0.12) {
+      bonus += 0.18;
+      matchedKeywords.add('place signal dominates');
+    }
+
+    return bonus;
+  }
+
+  double _foodBoost({
+    required _CueSummary cueSummary,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.foodCueCount > 0) {
+      bonus += 0.22 + (cueSummary.foodCueCount * 0.1);
+      matchedKeywords.add('food cue');
+    }
+
+    if (cueSummary.foodCueStrength >= 1.0) {
+      bonus += 0.24;
+      matchedKeywords.add('strong food cluster');
+    }
+
+    if (cueSummary.documentCueStrength >= cueSummary.foodCueStrength + 0.2) {
+      bonus -= 0.18;
+      matchedKeywords.add('document signal suppresses food');
+    }
+
+    return bonus;
+  }
+
+  double _documentBoost({
+    required _CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> matchedKeywords,
+  }) {
+    var bonus = 0.0;
+    var hasDocumentSignal = false;
+
+    if (_matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: _documentFilenameKeywords,
+    )) {
+      bonus += 0.58;
+      matchedKeywords.add('filename document');
+      hasDocumentSignal = true;
+    }
+
+    if (cueSummary.documentCueCount > 0) {
+      bonus += 0.2 + (cueSummary.documentCueCount * 0.1);
+      matchedKeywords.add('document cue');
+      hasDocumentSignal = true;
+    }
+
+    if (cueSummary.identityDocumentCueCount > 0) {
+      bonus += 0.42;
+      matchedKeywords.add('identity document');
+      hasDocumentSignal = true;
+    }
+
+    if (hasDocumentSignal && cueSummary.peopleCueCount > 0) {
+      bonus += 0.18;
+      matchedKeywords.add('document over embedded face');
+    }
+
+    if (cueSummary.documentCueStrength >= cueSummary.peopleCueStrength + 0.12) {
+      bonus += 0.26;
+      matchedKeywords.add('document signal dominates');
     }
 
     return bonus;
@@ -825,6 +1239,17 @@ class KeywordFolderMappingService implements FolderMappingService {
       matchedKeywords.add('screen aspect');
     }
 
+    if (hasScreenshotSignal && cueSummary.peopleCueCount > 0) {
+      bonus += 0.16;
+      matchedKeywords.add('screen over portrait');
+    }
+
+    if (cueSummary.screenshotCueStrength >=
+        cueSummary.peopleCueStrength + 0.12) {
+      bonus += 0.24;
+      matchedKeywords.add('screen signal dominates');
+    }
+
     return bonus;
   }
 
@@ -861,9 +1286,21 @@ class KeywordFolderMappingService implements FolderMappingService {
   _CueSummary _summarizeSignals(List<ClassificationLabel> labels) {
     var familyCueCount = 0;
     var peopleCueCount = 0;
+    var directPetCueCount = 0;
+    var foodCueCount = 0;
+    var placeCueCount = 0;
     var screenshotCueCount = 0;
+    var documentCueCount = 0;
+    var identityDocumentCueCount = 0;
     var animationCueCount = 0;
     var crowdCueCount = 0;
+    var familyCueStrength = 0.0;
+    var peopleCueStrength = 0.0;
+    var directPetCueStrength = 0.0;
+    var foodCueStrength = 0.0;
+    var placeCueStrength = 0.0;
+    var screenshotCueStrength = 0.0;
+    var documentCueStrength = 0.0;
 
     for (final label in labels) {
       final normalized = _normalize(label.displayName);
@@ -875,6 +1312,7 @@ class KeywordFolderMappingService implements FolderMappingService {
         cues: _familyCueKeywords,
       )) {
         familyCueCount += 1;
+        familyCueStrength += label.confidence;
       }
 
       if (_matchesCueSet(
@@ -883,6 +1321,34 @@ class KeywordFolderMappingService implements FolderMappingService {
         cues: _peopleCueKeywords,
       )) {
         peopleCueCount += 1;
+        peopleCueStrength += label.confidence;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _directPetCueKeywords,
+      )) {
+        directPetCueCount += 1;
+        directPetCueStrength += label.confidence;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _foodCueKeywords,
+      )) {
+        foodCueCount += 1;
+        foodCueStrength += label.confidence;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _placeCueKeywords,
+      )) {
+        placeCueCount += 1;
+        placeCueStrength += label.confidence;
       }
 
       if (_matchesCueSet(
@@ -891,6 +1357,24 @@ class KeywordFolderMappingService implements FolderMappingService {
         cues: _screenshotCueKeywords,
       )) {
         screenshotCueCount += 1;
+        screenshotCueStrength += label.confidence;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _documentCueKeywords,
+      )) {
+        documentCueCount += 1;
+        documentCueStrength += label.confidence;
+      }
+
+      if (_matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: _identityDocumentCueKeywords,
+      )) {
+        identityDocumentCueCount += 1;
       }
 
       if (_matchesCueSet(
@@ -911,9 +1395,21 @@ class KeywordFolderMappingService implements FolderMappingService {
     return _CueSummary(
       familyCueCount: familyCueCount,
       peopleCueCount: peopleCueCount,
+      directPetCueCount: directPetCueCount,
+      foodCueCount: foodCueCount,
+      placeCueCount: placeCueCount,
       screenshotCueCount: screenshotCueCount,
+      documentCueCount: documentCueCount,
+      identityDocumentCueCount: identityDocumentCueCount,
       animationCueCount: animationCueCount,
       crowdCueCount: crowdCueCount,
+      familyCueStrength: familyCueStrength,
+      peopleCueStrength: peopleCueStrength,
+      directPetCueStrength: directPetCueStrength,
+      foodCueStrength: foodCueStrength,
+      placeCueStrength: placeCueStrength,
+      screenshotCueStrength: screenshotCueStrength,
+      documentCueStrength: documentCueStrength,
     );
   }
 
@@ -1009,14 +1505,38 @@ class _CueSummary {
   const _CueSummary({
     required this.familyCueCount,
     required this.peopleCueCount,
+    required this.directPetCueCount,
+    required this.foodCueCount,
+    required this.placeCueCount,
     required this.screenshotCueCount,
+    required this.documentCueCount,
+    required this.identityDocumentCueCount,
     required this.animationCueCount,
     required this.crowdCueCount,
+    required this.familyCueStrength,
+    required this.peopleCueStrength,
+    required this.directPetCueStrength,
+    required this.foodCueStrength,
+    required this.placeCueStrength,
+    required this.screenshotCueStrength,
+    required this.documentCueStrength,
   });
 
   final int familyCueCount;
   final int peopleCueCount;
+  final int directPetCueCount;
+  final int foodCueCount;
+  final int placeCueCount;
   final int screenshotCueCount;
+  final int documentCueCount;
+  final int identityDocumentCueCount;
   final int animationCueCount;
   final int crowdCueCount;
+  final double familyCueStrength;
+  final double peopleCueStrength;
+  final double directPetCueStrength;
+  final double foodCueStrength;
+  final double placeCueStrength;
+  final double screenshotCueStrength;
+  final double documentCueStrength;
 }

@@ -1,14 +1,97 @@
 import 'package:flutter/material.dart';
 
 import '../../application/services/permission_service.dart';
-import 'onboarding_screen.dart';
+import '../../application/services/settings_service.dart';
+import '../../data/services/local_settings_service.dart';
+import '../../data/services/photo_manager_permission_service.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../domain/models/photo_permission_status.dart';
 import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
+import 'home_screen.dart';
+import 'onboarding_screen.dart';
+import 'permission_screen.dart';
 
-class SplashScreen extends StatelessWidget {
-  const SplashScreen({super.key, this.permissionService});
+enum HiveLaunchDestination { onboarding, permission, home }
+
+HiveLaunchDestination resolveHiveLaunchDestination({
+  required AppSettings settings,
+  required PhotoPermissionStatus permissionStatus,
+}) {
+  if (!settings.hasCompletedOnboarding) {
+    return HiveLaunchDestination.onboarding;
+  }
+
+  if (permissionStatus.hasAccess) {
+    return HiveLaunchDestination.home;
+  }
+
+  return HiveLaunchDestination.permission;
+}
+
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key, this.permissionService, this.settingsService});
 
   final PermissionService? permissionService;
+  final SettingsService? settingsService;
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> {
+  late final PermissionService _permissionService;
+  late final SettingsService _settingsService;
+
+  @override
+  void initState() {
+    super.initState();
+    _permissionService =
+        widget.permissionService ?? const PhotoManagerPermissionService();
+    _settingsService =
+        widget.settingsService ?? LocalSettingsService.standard();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _routeFromLaunch();
+    });
+  }
+
+  Future<void> _routeFromLaunch() async {
+    final settings = await _settingsService.loadSettings();
+
+    if (!mounted) {
+      return;
+    }
+
+    final permissionStatus = await _permissionService
+        .getPhotoPermissionStatus();
+
+    if (!mounted) {
+      return;
+    }
+
+    final destination = resolveHiveLaunchDestination(
+      settings: settings,
+      permissionStatus: permissionStatus,
+    );
+
+    final nextScreen = switch (destination) {
+      HiveLaunchDestination.onboarding => OnboardingScreen(
+        permissionService: _permissionService,
+        settingsService: _settingsService,
+      ),
+      HiveLaunchDestination.permission => PermissionScreen(
+        permissionService: _permissionService,
+        settingsService: _settingsService,
+      ),
+      HiveLaunchDestination.home => HomeScreen(
+        settingsService: _settingsService,
+      ),
+    };
+
+    await Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute<void>(builder: (_) => nextScreen));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,22 +166,17 @@ class SplashScreen extends StatelessWidget {
                             ],
                           ),
                         ),
-                        const SizedBox(height: 18),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => OnboardingScreen(
-                                  permissionService: permissionService,
-                                ),
-                              ),
-                            );
-                          },
-                          child: const Text('Get Started'),
+                        const SizedBox(height: 24),
+                        const Center(
+                          child: SizedBox(
+                            height: 28,
+                            width: 28,
+                            child: CircularProgressIndicator(strokeWidth: 2.4),
+                          ),
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 14),
                         Text(
-                          'Designed for a calm, premium setup flow.',
+                          'Preparing your local workspace...',
                           textAlign: TextAlign.center,
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: HiveColors.textSecondary,

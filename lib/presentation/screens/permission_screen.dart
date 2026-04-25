@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../application/services/permission_service.dart';
+import '../../application/services/settings_service.dart';
+import '../../data/services/local_settings_service.dart';
 import '../../data/services/photo_manager_permission_service.dart';
 import '../../domain/models/photo_permission_status.dart';
 import 'home_screen.dart';
@@ -8,9 +10,14 @@ import '../theme/hive_colors.dart';
 import '../widgets/hive_shell_background.dart';
 
 class PermissionScreen extends StatefulWidget {
-  const PermissionScreen({super.key, this.permissionService});
+  const PermissionScreen({
+    super.key,
+    this.permissionService,
+    this.settingsService,
+  });
 
   final PermissionService? permissionService;
+  final SettingsService? settingsService;
 
   @override
   State<PermissionScreen> createState() => _PermissionScreenState();
@@ -19,6 +26,7 @@ class PermissionScreen extends StatefulWidget {
 class _PermissionScreenState extends State<PermissionScreen>
     with WidgetsBindingObserver {
   late final PermissionService _permissionService;
+  late final SettingsService _settingsService;
 
   PhotoPermissionStatus? _status;
   bool _isBusy = false;
@@ -29,6 +37,8 @@ class _PermissionScreenState extends State<PermissionScreen>
     WidgetsBinding.instance.addObserver(this);
     _permissionService =
         widget.permissionService ?? const PhotoManagerPermissionService();
+    _settingsService =
+        widget.settingsService ?? LocalSettingsService.standard();
     _refreshStatus();
   }
 
@@ -91,7 +101,9 @@ class _PermissionScreenState extends State<PermissionScreen>
 
   Future<void> _continueToHome() async {
     await Navigator.of(context).pushReplacement(
-      MaterialPageRoute<void>(builder: (_) => const HomeScreen()),
+      MaterialPageRoute<void>(
+        builder: (_) => HomeScreen(settingsService: _settingsService),
+      ),
     );
   }
 

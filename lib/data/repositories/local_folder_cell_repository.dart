@@ -58,6 +58,7 @@ class LocalFolderCellRepository implements FolderCellRepository {
     );
   }
 
+  @override
   Future<void> replaceAll(List<FolderCell> cells) async {
     final snapshot = await _store.read();
     await _store.write(

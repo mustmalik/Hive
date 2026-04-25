@@ -45,6 +45,13 @@ class InMemoryMediaAssetRepository implements MediaAssetRepository {
     }
   }
 
+  @override
+  Future<void> replaceAll(List<MediaAsset> assets) async {
+    _assets
+      ..clear()
+      ..addAll(assets);
+  }
+
   static List<MediaAsset> _defaultAssets() {
     final now = DateTime.now();
 

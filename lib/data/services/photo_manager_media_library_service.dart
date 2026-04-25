@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:photo_manager/photo_manager.dart';
 
 import '../../application/models/media_album.dart';
@@ -6,13 +8,14 @@ import '../../application/services/media_library_service.dart';
 import '../../domain/entities/media_asset.dart';
 
 class PhotoManagerMediaLibraryService implements MediaLibraryService {
-  const PhotoManagerMediaLibraryService();
+  const PhotoManagerMediaLibraryService({this.debugLog});
 
   static const PermissionRequestOption _requestOption = PermissionRequestOption(
     iosAccessLevel: IosAccessLevel.readWrite,
   );
 
   static const FilterOption _assetFilterOption = FilterOption(needTitle: true);
+  final void Function(String message)? debugLog;
 
   @override
   Future<List<MediaAsset>> fetchAssets({
@@ -27,12 +30,15 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
 
     final filter = _buildFilter(updatedAfter: updatedAfter);
     final entities = switch (scope.kind) {
-      ScanScopeKind.allPhotos ||
-      ScanScopeKind.limitedPhotos => await PhotoManager.getAssetListPaged(
+      ScanScopeKind.allPhotos => await _fetchAllAssets(
+        filter: filter,
         page: page,
-        pageCount: pageSize,
-        type: RequestType.common,
-        filterOption: filter,
+        pageSize: pageSize,
+      ),
+      ScanScopeKind.limitedPhotos => await _fetchLimitedAssets(
+        filter: filter,
+        page: page,
+        pageSize: pageSize,
       ),
       ScanScopeKind.album => await _fetchScopedAlbumAssets(
         scope: scope,
@@ -111,22 +117,16 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
       return 0;
     }
 
-    if (scope.kind == ScanScopeKind.album) {
-      final path = await _resolveScopedPath(
+    final filter = _buildFilter();
+
+    return switch (scope.kind) {
+      ScanScopeKind.allPhotos => _getAllAssetCount(filter: filter),
+      ScanScopeKind.limitedPhotos => _getLimitedAssetCount(filter: filter),
+      ScanScopeKind.album => _getScopedAlbumAssetCount(
         scope: scope,
-        filter: _buildFilter(),
-      );
-      if (path == null) {
-        return 0;
-      }
-
-      return _resolvePathAssetCount(path);
-    }
-
-    return PhotoManager.getAssetCount(
-      type: RequestType.common,
-      filterOption: _buildFilter(),
-    );
+        filter: filter,
+      ),
+    };
   }
 
   FilterOptionGroup _buildFilter({DateTime? updatedAfter}) {
@@ -147,19 +147,120 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
   }) async {
     final path = await _resolveScopedPath(scope: scope, filter: filter);
     if (path == null) {
+      _log(
+        'fetch scope=${scope.kind.name} path=selected_album unresolved '
+        'albumId=${scope.albumId ?? 'missing'} page=$page pageSize=$pageSize',
+      );
       return const [];
     }
 
     final leafAlbums = await _resolveLeafAlbums(path, filter: filter);
     if (leafAlbums.isEmpty) {
+      _log(
+        'fetch scope=${scope.kind.name} path=selected_album empty '
+        'albumId=${path.id} albumName="${path.name}" page=$page pageSize=$pageSize',
+      );
       return const [];
     }
+
+    _log(
+      'fetch scope=${scope.kind.name} path=selected_album '
+      'albumId=${path.id} albumName="${path.name}" '
+      'isFolder=${scope.isFolder} leafAlbums=${leafAlbums.length} '
+      'page=$page pageSize=$pageSize',
+    );
 
     return _fetchAssetsFromAlbums(
       albums: leafAlbums,
       page: page,
       pageSize: pageSize,
     );
+  }
+
+  Future<List<AssetEntity>> _fetchAllAssets({
+    required FilterOptionGroup filter,
+    required int page,
+    required int pageSize,
+  }) {
+    _log(
+      'fetch scope=${ScanScopeKind.allPhotos.name} path=global_library '
+      'page=$page pageSize=$pageSize',
+    );
+    return PhotoManager.getAssetListPaged(
+      page: page,
+      pageCount: pageSize,
+      type: RequestType.common,
+      filterOption: filter,
+    );
+  }
+
+  Future<List<AssetEntity>> _fetchLimitedAssets({
+    required FilterOptionGroup filter,
+    required int page,
+    required int pageSize,
+  }) async {
+    final limitedPath = await _resolveLimitedScopePath(filter: filter);
+    if (limitedPath == null) {
+      _log(
+        'fetch scope=${ScanScopeKind.limitedPhotos.name} '
+        'path=limited_root unavailable page=$page pageSize=$pageSize',
+      );
+      return const [];
+    }
+
+    _log(
+      'fetch scope=${ScanScopeKind.limitedPhotos.name} path=limited_root '
+      'albumId=${limitedPath.id} albumName="${limitedPath.name}" '
+      'page=$page pageSize=$pageSize',
+    );
+    return limitedPath.getAssetListPaged(page: page, size: pageSize);
+  }
+
+  Future<int> _getAllAssetCount({required FilterOptionGroup filter}) async {
+    _log('count scope=${ScanScopeKind.allPhotos.name} path=global_library');
+    return PhotoManager.getAssetCount(
+      type: RequestType.common,
+      filterOption: filter,
+    );
+  }
+
+  Future<int> _getLimitedAssetCount({required FilterOptionGroup filter}) async {
+    final limitedPath = await _resolveLimitedScopePath(filter: filter);
+    if (limitedPath == null) {
+      _log(
+        'count scope=${ScanScopeKind.limitedPhotos.name} '
+        'path=limited_root unavailable',
+      );
+      return 0;
+    }
+
+    _log(
+      'count scope=${ScanScopeKind.limitedPhotos.name} path=limited_root '
+      'albumId=${limitedPath.id} albumName="${limitedPath.name}"',
+    );
+    return _resolvePathAssetCount(limitedPath);
+  }
+
+  Future<int> _getScopedAlbumAssetCount({
+    required ScanScope scope,
+    required FilterOptionGroup filter,
+  }) async {
+    final path = await _resolveScopedPath(scope: scope, filter: filter);
+    if (path == null) {
+      _log(
+        'count scope=${scope.kind.name} path=selected_album unresolved '
+        'albumId=${scope.albumId ?? 'missing'}',
+      );
+      return 0;
+    }
+
+    final count = await _resolvePathAssetCount(path);
+    _log(
+      'count scope=${scope.kind.name} path=selected_album '
+      'albumId=${path.id} albumName="${path.name}" '
+      'isFolder=${scope.isFolder} assetCount=$count',
+    );
+    return count;
   }
 
   Future<List<AssetEntity>> _fetchAssetsFromAlbums({
@@ -219,6 +320,24 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<AssetPathEntity?> _resolveLimitedScopePath({
+    required FilterOptionGroup filter,
+  }) async {
+    final paths = await PhotoManager.getAssetPathList(
+      hasAll: true,
+      onlyAll: true,
+      type: RequestType.common,
+      filterOption: filter,
+    );
+
+    if (paths.isEmpty) {
+      return null;
+    }
+
+    final refreshed = await _refreshPath(paths.first, filter: filter);
+    return refreshed ?? paths.first;
   }
 
   Future<AssetPathEntity?> _refreshPath(
@@ -288,6 +407,16 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
       PermissionState.denied ||
       PermissionState.restricted => false,
     };
+  }
+
+  void _log(String message) {
+    final callback = debugLog;
+    if (callback != null) {
+      callback(message);
+      return;
+    }
+
+    developer.log(message, name: 'HIVE.MediaLibrary');
   }
 
   MediaAsset _mapAssetEntity(AssetEntity entity) {

@@ -47,7 +47,17 @@ class InMemoryHomeDashboardService implements HomeDashboardService {
       styleKey: 'travel',
       featured: false,
     ),
+    'Places': (
+      summary: 'Scenery, venues, skylines, and memorable locations',
+      styleKey: 'places',
+      featured: false,
+    ),
     'Food': (summary: 'Plates worth saving', styleKey: 'food', featured: false),
+    'Videos': (
+      summary: 'Clips, motion moments, and moving memories',
+      styleKey: 'videos',
+      featured: false,
+    ),
     'Basketball': (
       summary: 'Game nights and court-side shots',
       styleKey: 'basketball',

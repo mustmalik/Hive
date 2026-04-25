@@ -295,6 +295,7 @@ ManualOverride manualOverrideFromJson(Map<String, dynamic> json) {
 
 Map<String, dynamic> appSettingsToJson(AppSettings settings) {
   return {
+    'hasCompletedOnboarding': settings.hasCompletedOnboarding,
     'scanImages': settings.scanImages,
     'scanVideos': settings.scanVideos,
     'allowSuggestedCells': settings.allowSuggestedCells,
@@ -318,6 +319,7 @@ AppSettings appSettingsFromJson(Map<String, dynamic>? json) {
   final lastCompletedScanAtRaw = json['lastCompletedScanAt'];
 
   return AppSettings(
+    hasCompletedOnboarding: json['hasCompletedOnboarding'] as bool? ?? false,
     scanImages: json['scanImages'] as bool? ?? true,
     scanVideos: json['scanVideos'] as bool? ?? true,
     allowSuggestedCells: json['allowSuggestedCells'] as bool? ?? true,

@@ -13,6 +13,7 @@ import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/folder_cell.dart';
+import '../../domain/entities/manual_override.dart';
 import '../../domain/entities/media_asset.dart';
 import '../../domain/entities/scan_run.dart';
 import '../repositories/local_classification_repository.dart';
@@ -60,6 +61,22 @@ class RealScanCoordinator implements ScanCoordinator {
   final DateTime Function() _now;
   final StreamController<ScanRun> _controller =
       StreamController<ScanRun>.broadcast();
+
+  static const Map<String, String> _suggestedCellNamesById = {
+    'people': 'People',
+    'family': 'Family',
+    'pets': 'Pets',
+    'travel': 'Travel',
+    'places': 'Places',
+    'food': 'Food',
+    'videos': 'Videos',
+    'screenshots': 'Screenshots',
+    'devices_tech': 'Devices / Tech',
+    'documents_receipts': 'Documents / Receipts',
+    'sports': 'Sports',
+    'animation_cartoon_meme': 'Animation / Cartoon / Meme',
+    'unsorted': 'Unsorted',
+  };
 
   ScanRun? _activeRun;
   Future<void>? _activeTask;
@@ -137,6 +154,19 @@ class RealScanCoordinator implements ScanCoordinator {
     final labelsByAssetId = <String, List<ClassificationLabel>>{};
     final outcomesByAssetId = <String, ClassificationOutcome>{};
     final manualOverrides = await _manualOverrideRepository.getAllOverrides();
+    final includeOverridesByAssetId = _resolveIncludeOverrides(manualOverrides);
+    final cachedAssetsById = {
+      for (final asset in await _mediaAssetRepository.getAllAssets())
+        asset.id: asset,
+    };
+    final cachedOutcomesByAssetId = await _classificationRepository
+        .getOutcomesForAssetIds(cachedAssetsById.keys.toList(growable: false));
+    final knownCellNamesById = {
+      ..._suggestedCellNamesById,
+      for (final cell in await _folderCellRepository.getAllCells())
+        cell.id: cell.name,
+    };
+    final seenCellIds = <String>{};
     var processedCount = 0;
     var page = 0;
     var latestDetectedCellName = startingRun.latestDetectedCellName;
@@ -165,25 +195,27 @@ class RealScanCoordinator implements ScanCoordinator {
             ordinal: processedCount + 1,
           );
 
-          final outcome = await _classifySafely(asset);
+          final outcome =
+              _resolveReusableOutcome(
+                asset: asset,
+                cachedAsset: cachedAssetsById[asset.id],
+                cachedOutcome: cachedOutcomesByAssetId[asset.id],
+              ) ??
+              await _classifySafely(asset);
           final labels = outcome.labels;
           labelsByAssetId[asset.id] = labels;
           outcomesByAssetId[asset.id] = outcome;
-
-          final cells = await _folderMappingService.buildSuggestedCells(
-            assets: processedAssets,
-            labelsByAssetId: labelsByAssetId,
-            overrides: manualOverrides,
+          final placement = _resolvePlacementForProgress(
+            asset: asset,
+            labels: labels,
+            override: includeOverridesByAssetId[asset.id],
+            knownCellNamesById: knownCellNamesById,
           );
 
           processedCount += 1;
-          generatedCellCount = cells.length;
-          latestDetectedCellName = _resolveLatestDetectedCellName(
-            asset: asset,
-            labels: labels,
-            cells: cells,
-            fallback: latestDetectedCellName,
-          );
+          seenCellIds.add(placement.cellId);
+          generatedCellCount = seenCellIds.length;
+          latestDetectedCellName = placement.cellName;
 
           final stageLabel = _resolveStageLabel(
             processedCount: processedCount,
@@ -287,14 +319,9 @@ class RealScanCoordinator implements ScanCoordinator {
     required List<FolderCell> cells,
     required Map<String, ClassificationOutcome> outcomesByAssetId,
   }) async {
-    await _classificationRepository.clear();
-    for (final outcome in outcomesByAssetId.values) {
-      await _classificationRepository.saveOutcome(outcome);
-    }
-    await _mediaAssetRepository.clear();
-    await _mediaAssetRepository.upsertAssets(assets);
-    await _folderCellRepository.clear();
-    await _folderCellRepository.saveCells(cells);
+    await _classificationRepository.saveOutcomes(outcomesByAssetId.values);
+    await _mediaAssetRepository.replaceAll(assets);
+    await _folderCellRepository.replaceAll(cells);
   }
 
   Future<ClassificationOutcome> _classifySafely(MediaAsset asset) async {
@@ -336,6 +363,81 @@ class RealScanCoordinator implements ScanCoordinator {
         asset.type == MediaAssetType.screenshot;
   }
 
+  Map<String, ManualOverride> _resolveIncludeOverrides(
+    List<ManualOverride> overrides,
+  ) {
+    final result = <String, ManualOverride>{};
+
+    for (final override in overrides) {
+      if (override.action != ManualOverrideAction.includeInCell ||
+          override.cellId == null) {
+        continue;
+      }
+
+      final existing = result[override.assetId];
+      if (existing == null || override.createdAt.isAfter(existing.createdAt)) {
+        result[override.assetId] = override;
+      }
+    }
+
+    return result;
+  }
+
+  ClassificationOutcome? _resolveReusableOutcome({
+    required MediaAsset asset,
+    required MediaAsset? cachedAsset,
+    required ClassificationOutcome? cachedOutcome,
+  }) {
+    if (cachedAsset == null || cachedOutcome == null) {
+      return null;
+    }
+
+    final isReusableStatus =
+        cachedOutcome.status != ClassificationOutcomeStatus.requestFailed &&
+        cachedOutcome.status !=
+            ClassificationOutcomeStatus.imagePreparationFailed;
+    if (!isReusableStatus) {
+      return null;
+    }
+
+    final isUnchanged =
+        cachedAsset.type == asset.type &&
+        cachedAsset.modifiedAt == asset.modifiedAt &&
+        cachedAsset.width == asset.width &&
+        cachedAsset.height == asset.height &&
+        cachedAsset.duration == asset.duration &&
+        cachedAsset.originalFilename == asset.originalFilename;
+
+    return isUnchanged ? cachedOutcome : null;
+  }
+
+  _ProgressPlacement _resolvePlacementForProgress({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+    required ManualOverride? override,
+    required Map<String, String> knownCellNamesById,
+  }) {
+    final overrideCellId = override?.cellId;
+    if (overrideCellId != null) {
+      return _ProgressPlacement(
+        cellId: overrideCellId,
+        cellName:
+            knownCellNamesById[overrideCellId] ??
+            _humanizeCellId(overrideCellId),
+      );
+    }
+
+    final explanation = _folderMappingService.explainPlacement(
+      asset: asset,
+      labels: labels,
+    );
+
+    return _ProgressPlacement(
+      cellId: explanation.cellId,
+      cellName: explanation.cellName,
+    );
+  }
+
   Future<void> _emitRun(ScanRun run) async {
     _activeRun = run;
     await _scanRunRepository.saveRun(run);
@@ -370,6 +472,20 @@ class RealScanCoordinator implements ScanCoordinator {
     };
   }
 
+  String _humanizeCellId(String cellId) {
+    final tokens = cellId
+        .split('_')
+        .where((token) => token.trim().isNotEmpty)
+        .toList(growable: false);
+    if (tokens.isEmpty) {
+      return 'Cell';
+    }
+
+    return tokens
+        .map((token) => '${token[0].toUpperCase()}${token.substring(1)}')
+        .join(' ');
+  }
+
   String _resolveStageLabel({
     required int processedCount,
     required int totalCountHint,
@@ -393,23 +509,11 @@ class RealScanCoordinator implements ScanCoordinator {
 
     return 'Shaping placeholder cells';
   }
+}
 
-  String _resolveLatestDetectedCellName({
-    required MediaAsset asset,
-    required List<ClassificationLabel> labels,
-    required List<FolderCell> cells,
-    required String? fallback,
-  }) {
-    for (final cell in cells) {
-      if (cell.coverAssetId == asset.id || cell.assetIds.contains(asset.id)) {
-        return cell.name;
-      }
-    }
+class _ProgressPlacement {
+  const _ProgressPlacement({required this.cellId, required this.cellName});
 
-    if (labels.isNotEmpty) {
-      return fallback ?? 'Unsorted';
-    }
-
-    return fallback ?? 'Unsorted';
-  }
+  final String cellId;
+  final String cellName;
 }

@@ -43,10 +43,22 @@ const List<HiveCellCategory> hiveTopLevelCategories = [
     styleKey: 'travel',
   ),
   HiveCellCategory(
+    id: 'places',
+    name: 'Places',
+    description: 'Scenery, venues, skylines, and memorable locations',
+    styleKey: 'places',
+  ),
+  HiveCellCategory(
     id: 'food',
     name: 'Food',
     description: 'Meals, drinks, and dishes worth remembering',
     styleKey: 'food',
+  ),
+  HiveCellCategory(
+    id: 'videos',
+    name: 'Videos',
+    description: 'Clips, motion moments, and moving memories',
+    styleKey: 'videos',
   ),
   HiveCellCategory(
     id: 'screenshots',

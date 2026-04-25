@@ -71,6 +71,11 @@ class LocalClassificationRepository implements ClassificationRepository {
 
   @override
   Future<void> saveOutcome(ClassificationOutcome outcome) async {
+    await saveOutcomes([outcome]);
+  }
+
+  @override
+  Future<void> saveOutcomes(Iterable<ClassificationOutcome> outcomes) async {
     final snapshot = await _store.read();
     final existing = <String, Map<String, dynamic>>{};
 
@@ -81,7 +86,9 @@ class LocalClassificationRepository implements ClassificationRepository {
       }
     }
 
-    existing[outcome.assetId] = classificationOutcomeToJson(outcome);
+    for (final outcome in outcomes) {
+      existing[outcome.assetId] = classificationOutcomeToJson(outcome);
+    }
 
     await _store.write(
       copyStoredScanSnapshot(

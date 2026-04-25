@@ -87,4 +87,11 @@ class InMemoryClassificationRepository implements ClassificationRepository {
   Future<void> saveOutcome(ClassificationOutcome outcome) async {
     _outcomesByAssetId[outcome.assetId] = outcome;
   }
+
+  @override
+  Future<void> saveOutcomes(Iterable<ClassificationOutcome> outcomes) async {
+    for (final outcome in outcomes) {
+      _outcomesByAssetId[outcome.assetId] = outcome;
+    }
+  }
 }
