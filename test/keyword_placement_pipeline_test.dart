@@ -1,0 +1,4572 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter_v1/application/models/asset_mapping_explanation.dart';
+import 'package:hive_flutter_v1/application/models/structural_signals.dart';
+import 'package:hive_flutter_v1/data/services/placement/keyword_placement_pipeline.dart';
+import 'package:hive_flutter_v1/data/services/placement/placement_definitions.dart';
+import 'package:hive_flutter_v1/data/services/placement/placement_models.dart';
+import 'package:hive_flutter_v1/data/services/structural_signal_extractor.dart';
+import 'package:hive_flutter_v1/domain/entities/classification_label.dart';
+import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
+
+void main() {
+  final analysisBuilder = PlacementAnalysisBuilder();
+  const routingStage = ContentTypeRoutingStage();
+  const scoringStage = WeightedCategoryScoringStage();
+  const decisionStage = PlacementDecisionStage();
+  final pipeline = KeywordPlacementPipeline();
+
+  group('structural signals are populated', () {
+    test(
+      'after extraction on an asset with a clear face structural faceCount is at least 1',
+      () async {
+        final asyncAnalysisBuilder = PlacementAnalysisBuilder(
+          structuralExtractor: StructuralSignalExtractor(
+            imageLoader: _fakeImageLoader,
+            faceExtractor: (_) async => const StructuralFaceObservation(
+              faceCount: 2,
+              largestFaceAreaRatio: 0.16,
+            ),
+            textExtractor: (_) async => StructuralTextObservation.empty,
+            barcodeExtractor: (_) async => StructuralBarcodeObservation.empty,
+          ),
+        );
+
+        final analysis = await asyncAnalysisBuilder.buildAsync(
+          asset: _imageAsset(id: 'group1_face_1'),
+          labels: [_label('texture', 0.22)],
+        );
+
+        expect(analysis.structural.faceCount, greaterThanOrEqualTo(1));
+      },
+    );
+
+    test(
+      'after extraction on a text heavy asset structural textCoverageRatio is greater than 0.10',
+      () async {
+        final asyncAnalysisBuilder = PlacementAnalysisBuilder(
+          structuralExtractor: StructuralSignalExtractor(
+            imageLoader: _fakeImageLoader,
+            faceExtractor: (_) async => StructuralFaceObservation.empty,
+            textExtractor: (_) async => const StructuralTextObservation(
+              lineTexts: [
+                'invoice',
+                'subtotal 12.00',
+                'tax 2.00',
+                'total 14.00',
+              ],
+              blockCount: 2,
+              textCoverageRatio: 0.32,
+            ),
+            barcodeExtractor: (_) async => StructuralBarcodeObservation.empty,
+          ),
+        );
+
+        final analysis = await asyncAnalysisBuilder.buildAsync(
+          asset: _imageAsset(id: 'group1_text_1'),
+          labels: [_label('paper', 0.18)],
+        );
+
+        expect(analysis.structural.textCoverageRatio, greaterThan(0.10));
+      },
+    );
+
+    test(
+      'after extraction on an asset with passport vocabulary structural hasMrzPattern is true',
+      () async {
+        final asyncAnalysisBuilder = PlacementAnalysisBuilder(
+          structuralExtractor: StructuralSignalExtractor(
+            imageLoader: _fakeImageLoader,
+            faceExtractor: (_) async => StructuralFaceObservation.empty,
+            textExtractor: (_) async => const StructuralTextObservation(
+              lineTexts: [
+                'P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<',
+                'L898902C36UTO7408122F1204159ZE184226B<<<<<10',
+              ],
+              blockCount: 1,
+              textCoverageRatio: 0.18,
+            ),
+            barcodeExtractor: (_) async => StructuralBarcodeObservation.empty,
+          ),
+        );
+
+        final analysis = await asyncAnalysisBuilder.buildAsync(
+          asset: _imageAsset(id: 'group1_mrz_1'),
+          labels: [_label('document', 0.24)],
+        );
+
+        expect(analysis.structural.hasMrzPattern, isTrue);
+      },
+    );
+  });
+
+  group('derived signals use structural signals correctly', () {
+    test(
+      'asset with largestFaceAreaRatio 0.12 and no person label yields humanPresenceScore above zero',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group2_face_area_1'),
+          labels: [_label('texture', 0.30)],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final derived = DerivedSignals.from(analysis);
+
+        expect(derived.humanPresenceScore, greaterThan(0.0));
+      },
+    );
+
+    test(
+      'asset with hasMrzPattern true yields documentnessScore at least 0.85',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group2_mrz_1'),
+          labels: [_label('texture', 0.21)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.20,
+            fullOcrText: 'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<',
+            lineCount: 2,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: true,
+          ),
+        );
+
+        final derived = DerivedSignals.from(analysis);
+
+        expect(derived.documentnessScore, greaterThanOrEqualTo(0.85));
+      },
+    );
+
+    test(
+      'asset with textCoverageRatio 0.40 yields graphicnessScore above zero',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group2_graphic_1'),
+          labels: [_label('paper', 0.11)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.40,
+            fullOcrText: 'headline body caption',
+            lineCount: 3,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final derived = DerivedSignals.from(analysis);
+
+        expect(derived.graphicnessScore, greaterThan(0.0));
+      },
+    );
+
+    test(
+      'asset with hasChatLikeLayout true yields uiDensityScore at least 0.80',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group2_chat_1'),
+          labels: [_label('texture', 0.18)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.10,
+            fullOcrText: 'hey\n09:41\nwhere are you',
+            lineCount: 6,
+            blockCount: 2,
+            hasChatLikeLayout: true,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final derived = DerivedSignals.from(analysis);
+
+        expect(derived.uiDensityScore, greaterThanOrEqualTo(0.80));
+      },
+    );
+  });
+
+  group('gates use structural signals correctly', () {
+    test(
+      'receipt-like document layout fires the Receipts content type gate',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group3_document_1'),
+          labels: [_label('texture', 0.18)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.18,
+            fullOcrText: 'invoice total tax',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: true,
+            barcodeCount: 1,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'receipts');
+      },
+    );
+
+    test(
+      'asset with hasMrzPattern true and face present routes to Documents Receipts not People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group3_mrz_face_1'),
+          labels: [_label('face', 0.84), _label('person', 0.80)],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.18,
+            fullOcrText:
+                'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<\n'
+                'l898902c36uto7408122f1204159ze184226b<<<<<10',
+            lineCount: 2,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: true,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'documents_receipts');
+        expect(explanation.cellId, isNot('people'));
+      },
+    );
+
+    test(
+      'chat-like layout with a primary face does not short-circuit to Screenshots',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group3_chat_face_1'),
+          labels: [_label('face', 0.86), _label('person', 0.82)],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.10,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.10,
+            fullOcrText: 'hey\n09:41\nwhere are you',
+            lineCount: 6,
+            blockCount: 2,
+            hasChatLikeLayout: true,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+
+        expect(explanation, isNull);
+      },
+    );
+
+    test(
+      'asset with isMemeOrPosterLike true routes to Animation Meme not Pets or Places',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'group3_meme_1'),
+          labels: [_label('pet', 0.58), _label('architecture', 0.54)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.35,
+            fullOcrText: 'headline\ncaption\npunchline',
+            lineCount: 3,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'memes');
+        expect(explanation.cellId, isNot('pets'));
+        expect(explanation.cellId, isNot('places'));
+      },
+    );
+  });
+
+  group('quote-card meme routing (high human labels)', () {
+    test('sports quote card with high human labels routes to meme not people', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'quote_card_sports_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('adult', 0.86),
+          _label('athlete', 0.84),
+          _label('jersey', 0.82),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.25,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.35,
+          fullOcrText: 'he said we will win',
+          lineCount: 5,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        scores: scores,
+        analysis: analysis,
+        derived: derived,
+      );
+      expect(explanation.cellId, 'memes');
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test('caption meme with athlete routes to meme not people or sports', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'quote_card_caption_1'),
+        labels: [
+          _label('person', 0.82),
+          _label('adult', 0.80),
+          _label('athlete', 0.78),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.20,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.15,
+          fullOcrText: 'he thinks lebron is unstoppable',
+          lineCount: 3,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        scores: scores,
+        analysis: analysis,
+        derived: derived,
+      );
+      expect(explanation.cellId, 'memes');
+      expect(explanation.cellId, isNot('people'));
+      expect(explanation.cellId, isNot('sports'));
+    });
+
+    test('real portrait with no text overlay still routes to people', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'portrait_no_text_1'),
+        labels: [
+          _label('person', 0.91),
+          _label('adult', 0.86),
+          _label('face', 0.88),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.30,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.02,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        scores: scores,
+        analysis: analysis,
+        derived: derived,
+      );
+      expect(explanation.cellId, 'people');
+    });
+
+    test('portrait with small watermark stays people (below 0.12 coverage)', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'portrait_watermark_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('adult', 0.84),
+          _label('face', 0.86),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.28,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.04,
+          fullOcrText: '©',
+          lineCount: 1,
+          blockCount: 1,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        scores: scores,
+        analysis: analysis,
+        derived: derived,
+      );
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('animation_cartoon_meme'));
+    });
+  });
+
+  group('light caption overlay meme routing', () {
+    test(
+      'sports photo with Snapchat-style caption overlay routes to Animation Meme',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'caption_overlay_sports_1'),
+          labels: [
+            _label('athlete', 0.86),
+            _label('sport', 0.82),
+            _label('person', 0.80),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.16,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.10,
+            fullOcrText: "Mf thinks he's LEBRON",
+            lineCount: 1,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'memes');
+        expect(explanation.cellId, isNot('people'));
+        expect(explanation.cellId, isNot('sports'));
+        expect(explanation.cellId, isNot('screenshots'));
+        expect(explanation.cellId, isNot('documents_receipts'));
+      },
+    );
+
+    test('sports action photo with no caption overlay still routes to sports', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'sports_action_no_caption_1'),
+        labels: [
+          _label('sport', 0.90),
+          _label('athlete', 0.88),
+          _label('ball', 0.84),
+          _label('stadium', 0.82),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        scores: scores,
+        analysis: analysis,
+        derived: derived,
+      );
+      expect(explanation.cellId, 'sports');
+      expect(explanation.cellId, isNot('animation_cartoon_meme'));
+    });
+  });
+
+  group('animation vs memes split', () {
+    test('black-and-white manga panel with speech bubbles routes to Animation', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'manga_bw_panel_1'),
+        labels: [
+          _label('manga', 0.90),
+          _label('comic', 0.84),
+          _label('illustration', 0.72),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.10,
+          fullOcrText: '...dialogue...\n...dialogue...',
+          lineCount: 2,
+          blockCount: 3,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'animation');
+      expect(explanation.cellId, isNot('memes'));
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test('manga portrait panel with dialogue routes to Animation (not Memes)', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'manga_portrait_panel_1'),
+        labels: [
+          _label('manga', 0.86),
+          _label('comic', 0.80),
+          _label('cartoon', 0.74),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.10,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.12,
+          fullOcrText: 'dialogue bubble\nmore dialogue',
+          lineCount: 2,
+          blockCount: 3,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'animation');
+      expect(explanation.cellId, isNot('memes'));
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test('cartoon/anime frame with arrows/circles annotations routes to Memes', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'anime_annotation_meme_1'),
+        labels: [
+          _label('anime', 0.88),
+          _label('cartoon', 0.84),
+          _label('illustration', 0.78),
+          _label('meme', 0.72),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.10,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.22,
+          fullOcrText: 'pov\nlook at this\nlol',
+          lineCount: 3,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'memes');
+      expect(explanation.cellId, isNot('animation'));
+    });
+
+    test('athlete quote-card poster routes to Memes', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'athlete_quote_card_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('athlete', 0.84),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.25,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.35,
+          fullOcrText: 'he said we will win',
+          lineCount: 5,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+      final explanation = routingStage.route(analysis);
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'memes');
+    });
+
+    test('dominant car photo routes to Cars (vehicles)', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'cars_dominant_1'),
+        labels: [
+          _label('car', 0.92),
+          _label('vehicle', 0.88),
+          _label('automobile', 0.84),
+          _label('wheel', 0.78),
+        ],
+      );
+      expect(explanation.cellId, 'vehicles');
+      expect(explanation.cellName, 'Cars');
+      expect(explanation.cellId, isNot('places'));
+    });
+
+    test('night street scene without dominant vehicle routes to Places', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'night_street_scene_1'),
+        labels: [
+          _label('street', 0.92),
+          _label('city', 0.86),
+          _label('building', 0.80),
+          _label('night', 0.78),
+        ],
+      );
+      expect(explanation.cellId, 'places');
+      expect(explanation.cellId, isNot('vehicles'));
+    });
+
+    test('cartoon/anime human-like character must not end in People', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'anime_character_1'),
+        labels: [
+          _label('anime', 0.92),
+          _label('cartoon', 0.88),
+          _label('character', 0.84),
+          _label('face', 0.82),
+          _label('person', 0.80),
+        ],
+      );
+      expect(explanation.cellId, isNot('people'));
+      expect(explanation.cellId, anyOf(equals('animation'), equals('memes')));
+    });
+
+    test('clean manga panel with dialogue must NOT route to Memes', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'manga_clean_dialogue_1'),
+        labels: [
+          _label('manga', 0.92),
+          _label('comic', 0.86),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.10,
+          fullOcrText: 'dialogue\ndialogue',
+          lineCount: 2,
+          blockCount: 3,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+      final explanation = routingStage.route(analysis);
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'animation');
+    });
+  });
+
+  group('runtime regression logs: animation/cars/people guardrails', () {
+    test('manga unsorted regression: illustrations+art routes to Animation', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_manga_unsorted_1'),
+        labels: [
+          _label('illustrations', 0.94),
+          _label('art', 0.93),
+          _label('document', 0.11),
+          _label('printed_page', 0.08),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.10,
+          fullOcrText: 'dialogue bubble\ndialogue bubble',
+          lineCount: 2,
+          blockCount: 3,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final routed = routingStage.route(analysis);
+      expect(routed, isNotNull);
+      expect(routed!.cellId, 'animation');
+      expect(routed.cellId, isNot('unsorted'));
+      expect(routed.cellId, isNot('documents_receipts'));
+      expect(routed.cellId, isNot('devices_tech'));
+      expect(routed.cellId, isNot('memes'));
+    });
+
+    test('manga variant: art+illustration+drawing routes to Animation', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'runtime_manga_variant_1'),
+        labels: [
+          _label('art', 0.88),
+          _label('illustration', 0.85),
+          _label('drawing', 0.72),
+        ],
+      );
+
+      final routed = routingStage.route(analysis);
+      expect(routed, isNotNull);
+      expect(routed!.cellId, 'animation');
+      expect(routed.cellId, isNot('memes'));
+      expect(routed.cellId, isNot('people'));
+    });
+
+    test('skipper/animated character guard: low people/adult + art evidence never becomes People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_skipper_people_bug_1'),
+        labels: [
+          _label('people', 0.46),
+          _label('adult', 0.40),
+          _label('sign', 0.30),
+          _label('illustration', 0.72),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = pipeline.explainPlacement(
+        asset: analysis.asset,
+        labels: analysis.scoringLabels,
+      );
+      expect(explanation.cellId, isNot('people'));
+      expect(explanation.cellId, anyOf(equals('animation'), equals('memes')));
+    });
+
+    test('BMW car regression: wheel 0.56 + sky 0.97 routes to Cars (vehicles)', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'runtime_bmw_nature_bug_1'),
+        labels: [
+          _label('sky', 0.97),
+          _label('blue_sky', 0.71),
+          _label('wheel', 0.56),
+          _label('outdoor', 0.11),
+        ],
+      );
+
+      final routed = routingStage.route(analysis);
+      expect(routed, isNotNull);
+      expect(routed!.cellId, 'vehicles');
+      expect(routed.cellId, isNot('nature'));
+      expect(routed.cellId, isNot('places'));
+    });
+
+    test('negative: real human portrait with face structural evidence routes to People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_real_portrait_1'),
+        labels: [
+          _label('person', 0.92),
+          _label('adult', 0.86),
+          _label('face', 0.84),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.20,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = pipeline.explainPlacement(
+        asset: analysis.asset,
+        labels: analysis.scoringLabels,
+      );
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('animation'));
+      expect(explanation.cellId, isNot('memes'));
+    });
+
+    test('negative: night street scene with no vehicle cues is not Cars', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'runtime_night_street_no_car_1'),
+        labels: [
+          _label('street', 0.92),
+          _label('city', 0.88),
+          _label('building', 0.82),
+          _label('skyline', 0.78),
+        ],
+      );
+      expect(explanation.cellId, isNot('vehicles'));
+    });
+
+    test('penguins skipper weak people labels do not route to People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_penguins_skipper_weak_people_1'),
+        labels: [
+          _label('people', 0.39),
+          _label('adult', 0.39),
+          _label('structure', 0.11),
+          _label('sign', 0.11),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0.02,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, isNot('people'));
+      expect(explanation.cellId, anyOf(equals('animation'), equals('memes')));
+    });
+
+    test('real selfie with strong people labels stays People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_selfie_strong_people_1'),
+        labels: [
+          _label('people', 0.88),
+          _label('adult', 0.85),
+          _label('portrait', 0.72),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.18,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'people');
+    });
+
+    test('real portrait with moderate people labels and meaningful face stays People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_portrait_moderate_people_1'),
+        labels: [
+          _label('people', 0.62),
+          _label('adult', 0.58),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.12,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'people');
+    });
+
+    test('weak people labels with meaningful face evidence still may be People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'runtime_weak_people_but_face_1'),
+        labels: [
+          _label('people', 0.48),
+          _label('adult', 0.45),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.10,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.00,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'people');
+    });
+
+    test(
+      'multi-fix anime weak people/adult with cartoon-like face routes Animation/Memes not People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_anime_face_yuji_1'),
+          labels: [
+            _label('people', 0.40),
+            _label('adult', 0.38),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.00,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, isNot('people'));
+        expect(explanation.cellId, anyOf(equals('animation'), equals('memes')));
+      },
+    );
+
+    test(
+      'multi-fix manga-style panel no face routes Animation/Memes not People/Unsorted',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_manga_geto_panel_1'),
+          labels: [
+            _label('structure', 0.45),
+            _label('indoor', 0.38),
+            _label('sign', 0.22),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.00,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, isNot('people'));
+        expect(explanation.cellId, isNot('unsorted'));
+        expect(explanation.cellId, anyOf(equals('animation'), equals('memes')));
+      },
+    );
+
+    test(
+      'multi-fix food packaging graphic text OCR routes Food not Documents/Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_jacobs_cappuccino_box_1'),
+          labels: [
+            _label('text', 0.65),
+            _label('sign', 0.58),
+            _label('beverage', 0.45),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.22,
+            fullOcrText:
+                'JACOBS CAPPUCCINO\nreduced sugar\nserving suggestion\ningredients',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'food');
+        expect(explanation.cellId, isNot('documents_receipts'));
+        expect(explanation.cellId, isNot('memes'));
+      },
+    );
+
+    test(
+      'multi-fix photo of phone screen routes Devices/Tech or Screenshots not People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_snapchat_phone_photo_1'),
+          labels: [
+            _label('technology', 0.72),
+            _label('display', 0.60),
+            _label('people', 0.44),
+            _label('adult', 0.42),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.05,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.08,
+            fullOcrText: '',
+            lineCount: 1,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, isNot('people'));
+        expect(
+          explanation.cellId,
+          anyOf(equals('devices_tech'), equals('screenshots')),
+        );
+      },
+    );
+
+    test(
+      'multi-fix BMW M3 outdoor routes Vehicles not Places/Nature',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'multi_fix_bmw_m3_outdoor_1'),
+          labels: [
+            _label('car', 0.68),
+            _label('vehicle', 0.62),
+            _label('sky', 0.55),
+            _label('tree', 0.48),
+          ],
+        );
+
+        expect(explanation.cellId, 'vehicles');
+        expect(explanation.cellId, isNot('places'));
+        expect(explanation.cellId, isNot('nature'));
+      },
+    );
+
+    test(
+      'multi-fix real selfie stays People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_real_selfie_guard_1'),
+          labels: [
+            _label('people', 0.88),
+            _label('adult', 0.85),
+            _label('selfie', 0.72),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.22,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.00,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'people');
+      },
+    );
+
+    test(
+      'multi-fix dessert takeaway on table routes Food not Unsorted',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'multi_fix_donuts_table_1'),
+          labels: [
+            _label('dessert', 0.55),
+            _label('food', 0.48),
+            _label('table', 0.42),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.02,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'food');
+        expect(explanation.cellId, isNot('unsorted'));
+      },
+    );
+  });
+
+  test(
+    'buildAsync populates structural signals when extractor detects faces and text',
+    () async {
+      final asyncAnalysisBuilder = PlacementAnalysisBuilder(
+        structuralExtractor: StructuralSignalExtractor(
+          imageLoader: _fakeImageLoader,
+          faceExtractor: (_) async => const StructuralFaceObservation(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.14,
+          ),
+          textExtractor: (_) async => const StructuralTextObservation(
+            lineTexts: ['passport', '09:41', 'identity'],
+            blockCount: 2,
+            textCoverageRatio: 0.24,
+          ),
+          barcodeExtractor: (_) async => const StructuralBarcodeObservation(
+            barcodeCount: 1,
+            hasQrCode: true,
+          ),
+        ),
+      );
+
+      final analysis = await asyncAnalysisBuilder.buildAsync(
+        asset: _imageAsset(id: 'analysis_structural_1'),
+        labels: [_label('person', 0.82), _label('document', 0.48)],
+      );
+
+      expect(analysis.structural.faceCount, 1);
+      expect(analysis.structural.largestFaceAreaRatio, 0.14);
+      expect(analysis.structural.textCoverageRatio, greaterThan(0));
+      expect(analysis.structural.fullOcrText, contains('passport'));
+      expect(analysis.structural.barcodeCount, 1);
+      expect(analysis.structural.hasQrCode, isTrue);
+    },
+  );
+
+  test(
+    'derived humanPresenceScore uses structural face area when no person labels exist',
+    () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'derived_structural_face_area_1'),
+        labels: [_label('texture', 0.34)],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.10,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+
+      expect(derived.humanPresenceScore, greaterThan(0.0));
+    },
+  );
+
+  test('derived humanPresenceScore uses person label confidence directly', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'derived_person_label_1'),
+      labels: [_label('person', 0.8)],
+      structural: StructuralSignals.empty(),
+    );
+
+    final derived = DerivedSignals.from(analysis);
+
+    expect(derived.humanPresenceScore, 0.8);
+  });
+
+  test('derived documentnessScore uses structural MRZ signal', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'derived_mrz_1'),
+      labels: [_label('texture', 0.22)],
+      structural: const StructuralSignals(
+        faceCount: 0,
+        largestFaceAreaRatio: 0,
+        hasSingleLargeFace: false,
+        textCoverageRatio: 0.18,
+        fullOcrText: 'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<',
+        lineCount: 2,
+        blockCount: 1,
+        hasChatLikeLayout: false,
+        hasTableLikeLayout: false,
+        barcodeCount: 0,
+        hasQrCode: false,
+        hasMrzPattern: true,
+      ),
+    );
+
+    final derived = DerivedSignals.from(analysis);
+
+    expect(derived.documentnessScore, greaterThanOrEqualTo(0.85));
+  });
+
+  test(
+    'derived graphicnessScore uses text coverage without graphic labels',
+    () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'derived_graphic_coverage_1'),
+        labels: [_label('paper', 0.12)],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.50,
+          fullOcrText: 'headline body caption',
+          lineCount: 3,
+          blockCount: 1,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final derived = DerivedSignals.from(analysis);
+
+      expect(derived.graphicnessScore, greaterThan(0.0));
+    },
+  );
+
+  test('derived uiDensityScore uses chat-like structural layout', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'derived_chat_ui_1'),
+      labels: [_label('texture', 0.18)],
+      structural: const StructuralSignals(
+        faceCount: 0,
+        largestFaceAreaRatio: 0,
+        hasSingleLargeFace: false,
+        textCoverageRatio: 0.10,
+        fullOcrText: 'hey\n09:41\nwhere are you',
+        lineCount: 6,
+        blockCount: 2,
+        hasChatLikeLayout: true,
+        hasTableLikeLayout: false,
+        barcodeCount: 0,
+        hasQrCode: false,
+        hasMrzPattern: false,
+      ),
+    );
+
+    final derived = DerivedSignals.from(analysis);
+
+    expect(derived.uiDensityScore, greaterThanOrEqualTo(0.80));
+  });
+
+  test(
+    'structural MRZ routes to Documents Receipts even when a face is present',
+    () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'route_structural_mrz_1'),
+        labels: [_label('face', 0.84), _label('person', 0.8)],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.12,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.18,
+          fullOcrText:
+              'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<\n'
+              'l898902c36uto7408122f1204159ze184226b<<<<<10',
+          lineCount: 2,
+          blockCount: 1,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: true,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'documents_receipts');
+      expect(explanation.cellId, isNot('people'));
+    },
+  );
+
+  test('structural chat screenshot route yields to a primary person', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'route_structural_chat_1'),
+      labels: [_label('face', 0.86), _label('person', 0.82)],
+      structural: const StructuralSignals(
+        faceCount: 1,
+        largestFaceAreaRatio: 0.10,
+        hasSingleLargeFace: true,
+        textCoverageRatio: 0.10,
+        fullOcrText: 'hey\n09:41\nwhere are you',
+        lineCount: 6,
+        blockCount: 2,
+        hasChatLikeLayout: true,
+        hasTableLikeLayout: false,
+        barcodeCount: 0,
+        hasQrCode: false,
+        hasMrzPattern: false,
+      ),
+    );
+
+    final explanation = routingStage.route(analysis);
+
+    expect(explanation, isNull);
+  });
+
+  test('structural meme poster route beats pets and places', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'route_structural_meme_1'),
+      labels: [_label('pet', 0.58), _label('architecture', 0.54)],
+      structural: const StructuralSignals(
+        faceCount: 0,
+        largestFaceAreaRatio: 0,
+        hasSingleLargeFace: false,
+        textCoverageRatio: 0.35,
+        fullOcrText: 'headline\ncaption\npunchline',
+        lineCount: 3,
+        blockCount: 1,
+        hasChatLikeLayout: false,
+        hasTableLikeLayout: false,
+        barcodeCount: 0,
+        hasQrCode: false,
+        hasMrzPattern: false,
+      ),
+    );
+
+    final explanation = routingStage.route(analysis);
+
+    expect(explanation, isNotNull);
+    expect(explanation!.cellId, 'memes');
+    expect(explanation.cellId, isNot('pets'));
+    expect(explanation.cellId, isNot('places'));
+  });
+
+  test('sports scoreboard text with flag token does not route to Places', () {
+    final analysis = _analysisWithStructural(
+      asset: _imageAsset(id: 'route_structural_scoreboard_1'),
+      labels: [_label('flag', 0.34), _label('architecture', 0.46)],
+      structural: const StructuralSignals(
+        faceCount: 0,
+        largestFaceAreaRatio: 0,
+        hasSingleLargeFace: false,
+        textCoverageRatio: 0.24,
+        fullOcrText: 'league fixture england vs france full time score 2 1',
+        lineCount: 4,
+        blockCount: 2,
+        hasChatLikeLayout: false,
+        hasTableLikeLayout: false,
+        barcodeCount: 0,
+        hasQrCode: false,
+        hasMrzPattern: false,
+      ),
+    );
+
+    final explanation = routingStage.route(analysis);
+
+    expect(explanation, isNotNull);
+    expect(explanation!.cellId, 'memes');
+    expect(explanation.cellId, isNot('places'));
+  });
+
+  test(
+    'analysis emits strong human-centered signals for selfie-like photos',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'analysis_people_1'),
+        labels: [
+          _label('selfie', 0.88),
+          _label('face', 0.8),
+          _label('person', 0.74),
+          _label('pet', 0.52),
+        ],
+      );
+
+      expect(analysis.signals.humanCentered.isStrong, isTrue);
+      expect(analysis.signals.humanPresence.isStrong, isTrue);
+      expect(
+        analysis.signals.humanCentered.score,
+        greaterThan(analysis.signals.petCentered.score),
+      );
+      expect(analysis.signals.petCentered.isStrong, isFalse);
+    },
+  );
+
+  test(
+    'analysis emits strong document-first signals for passport-like assets',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'analysis_document_1',
+          filename: 'passport_scan.jpg',
+        ),
+        labels: [
+          _label('passport', 0.95),
+          _label('document', 0.86),
+          _label('face', 0.66),
+        ],
+      );
+
+      expect(analysis.signals.documentLike.isStrong, isTrue);
+      expect(analysis.signals.documentness.isStrong, isTrue);
+      expect(analysis.signals.graphicPostLike.isStrong, isFalse);
+    },
+  );
+
+  test(
+    'analysis emits strong graphic-post signals for text-overlay meme assets',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'analysis_graphic_1'),
+        labels: [
+          _label('meme', 0.83),
+          _label('text', 0.78),
+          _label('graphic design', 0.75),
+        ],
+      );
+
+      expect(analysis.signals.graphicPostLike.isStrong, isTrue);
+      expect(analysis.signals.graphicMemeNess.isStrong, isTrue);
+      expect(analysis.signals.documentLike.isStrong, isFalse);
+    },
+  );
+
+  test(
+    'analysis emits strong UI-density signals for screenshot-like frames',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'analysis_ui_1',
+          filename: 'Screenshot 2026-04-20 at 08.41.10.png',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('user interface', 0.86),
+          _label('text message', 0.79),
+          _label('notification', 0.71),
+        ],
+      );
+
+      expect(analysis.signals.uiDensity.isStrong, isTrue);
+      expect(analysis.signals.screenshotLike.isStrong, isTrue);
+    },
+  );
+
+  test(
+    'analysis emits strong scene-place strength for architecture-heavy imagery',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'analysis_place_1'),
+        labels: [
+          _label('architecture', 0.86),
+          _label('mosque', 0.8),
+          _label('courtyard', 0.72),
+        ],
+      );
+
+      expect(analysis.signals.scenePlaceStrength.isStrong, isTrue);
+      expect(analysis.signals.uiDensity.isStrong, isFalse);
+    },
+  );
+
+  test(
+    'document-style routing short-circuits obvious ID copies before scoring',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'route_document_1',
+          filename: 'id_copy_scan.jpg',
+        ),
+        labels: [
+          _label('id card', 0.92),
+          _label('document', 0.84),
+          _label('face', 0.64),
+        ],
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'documents_receipts');
+      expect(explanation.primaryEvidence, contains('identity document'));
+      expect(explanation.secondarySupport, contains('document style routing'));
+    },
+  );
+
+  test(
+    'graphic-style routing short-circuits obvious meme/post assets before scoring',
+    () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(
+          id: 'route_graphic_1',
+          filename: 'Screenshot_reshared_card.jpg',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('user interface', 0.88),
+          _label('text', 0.82),
+          _label('graphic design', 0.78),
+          _label('meme', 0.74),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.30,
+          fullOcrText: 'headline\ncaption\nshare this\nfooter',
+          lineCount: 4,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'memes');
+      expect(
+        explanation.secondarySupport,
+        anyOf(contains('graphic style routing'), contains('meme route')),
+      );
+    },
+  );
+
+  group('phase 1 explanation separation', () {
+    test(
+      'fallback lowConfidenceAnimal appears only in fallbackOrDebugReasons',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'phase1_fallback_animal_1'),
+          labels: [_label('dog', 0.74)],
+        );
+
+        expect(explanation.cellId, 'unsorted');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          contains('fallback lowConfidenceAnimal'),
+        );
+        expect(
+          explanation.primaryEvidence,
+          isNot(contains('fallback lowConfidenceAnimal')),
+        );
+        expect(
+          explanation.matchedKeywords,
+          isNot(contains('fallback lowConfidenceAnimal')),
+        );
+      },
+    );
+
+    test(
+      'places support strings stay in secondarySupport not primaryEvidence',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'phase1_places_1'),
+          labels: [
+            _label('landscape', 0.9),
+            _label('sky', 0.78),
+            _label('bridge', 0.61),
+          ],
+        );
+
+        final placesScore = _scoreForCell(
+          scoringStage.score(analysis),
+          'places',
+        );
+
+        expect(
+          placesScore.primaryEvidence,
+          isNot(contains('scene place signal')),
+        );
+        expect(
+          placesScore.primaryEvidence,
+          isNot(contains('no dominant person')),
+        );
+        expect(
+          placesScore.secondarySupport,
+          containsAll(['scene place signal', 'no dominant person']),
+        );
+      },
+    );
+
+    test(
+      'document support strings stay in secondarySupport while direct evidence remains primary',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(
+            id: 'phase1_document_1',
+            filename: 'receipt_scan.jpg',
+          ),
+          labels: [
+            _label('document', 0.86),
+            _label('receipt', 0.81),
+            _label('text', 0.74),
+          ],
+        );
+
+        final documentScore = _scoreForCell(
+          scoringStage.score(analysis),
+          'documents_receipts',
+        );
+
+        expect(documentScore.primaryEvidence, contains('document'));
+        expect(
+          documentScore.secondarySupport,
+          containsAll(['document-like signal', 'document-first signal']),
+        );
+        expect(
+          documentScore.primaryEvidence,
+          isNot(contains('document-like signal')),
+        );
+        expect(
+          documentScore.primaryEvidence,
+          isNot(contains('document-first signal')),
+        );
+      },
+    );
+
+    test(
+      'screenshot support strings stay in secondarySupport while direct evidence remains primary',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(
+            id: 'phase1_screenshot_1',
+            filename: 'Screenshot 2026-04-20 at 08.41.10.png',
+            width: 1179,
+            height: 2556,
+          ),
+          labels: [
+            _label('user interface', 0.84),
+            _label('text message', 0.77),
+          ],
+        );
+
+        final screenshotScore = _scoreForCell(
+          scoringStage.score(analysis),
+          'screenshots',
+        );
+
+        expect(
+          screenshotScore.primaryEvidence,
+          contains('filename screenshot'),
+        );
+        expect(
+          screenshotScore.secondarySupport,
+          containsAll([
+            'ui signal',
+            'chat or messaging UI',
+            'screen-like signal',
+          ]),
+        );
+        expect(screenshotScore.primaryEvidence, isNot(contains('ui signal')));
+        expect(
+          screenshotScore.primaryEvidence,
+          isNot(contains('chat or messaging UI')),
+        );
+        expect(
+          screenshotScore.primaryEvidence,
+          isNot(contains('screen-like signal')),
+        );
+      },
+    );
+
+    test('matchedKeywords remains a subset of primaryEvidence', () {
+      final explanations = [
+        pipeline.explainPlacement(
+          asset: _imageAsset(
+            id: 'phase1_invariant_people_1',
+            filename: 'people_trip.jpg',
+          ),
+          labels: [_label('person', 0.88), _label('portrait', 0.79)],
+        ),
+        pipeline.explainPlacement(
+          asset: _imageAsset(
+            id: 'phase1_invariant_document_1',
+            filename: 'passport_scan.jpg',
+          ),
+          labels: [_label('passport', 0.95), _label('document', 0.86)],
+        ),
+        pipeline.explainPlacement(
+          asset: _imageAsset(
+            id: 'phase1_invariant_screen_1',
+            filename: 'Screenshot 2026-04-20 at 08.41.10.png',
+            width: 1179,
+            height: 2556,
+          ),
+          labels: [
+            _label('user interface', 0.84),
+            _label('text message', 0.77),
+          ],
+        ),
+      ];
+
+      for (final explanation in explanations) {
+        expect(
+          explanation.matchedKeywords.every(
+            explanation.primaryEvidence.contains,
+          ),
+          isTrue,
+        );
+      }
+    });
+  });
+
+  group('phase 2 keyword strictness', () {
+    test('screen and device labels do not create strong Places evidence', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'phase2_device_places_1',
+          filename: 'office_setup.jpg',
+        ),
+        labels: [
+          _label('laptop', 0.94),
+          _label('monitor', 0.9),
+          _label('television', 0.84),
+          _label('display panel', 0.78),
+        ],
+      );
+
+      final scores = scoringStage.score(analysis);
+      final techScore = _scoreForCell(scores, 'devices_tech');
+      final placesScore = _scoreForCell(scores, 'places');
+
+      expect(techScore.score, greaterThan(placesScore.score));
+      expect(placesScore.primaryEvidence, isEmpty);
+      expect(
+        placesScore.score,
+        lessThan(KeywordPlacementDefinitions.fallbackThreshold),
+      );
+    });
+
+    test('substring only document support cannot beat exact tech evidence', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'phase2_document_substring_1',
+          filename: 'neutral_frame.jpg',
+        ),
+        labels: [_label('documentary', 0.96), _label('laptop', 0.92)],
+      );
+
+      final scores = scoringStage.score(analysis);
+      final documentScore = _scoreForCell(scores, 'documents_receipts');
+      final techScore = _scoreForCell(scores, 'devices_tech');
+
+      expect(documentScore.score, lessThan(techScore.score));
+      expect(documentScore.primaryEvidence, isEmpty);
+      expect(documentScore.matchedKeywords, isEmpty);
+      expect(
+        documentScore.secondarySupport,
+        contains('weak documents keyword support'),
+      );
+    });
+
+    test('screenshot routing stays stable with genuine UI evidence', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'phase2_screenshot_stability_1',
+          filename: 'reference_capture.png',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('user interface', 0.88),
+          _label('text message thread', 0.84),
+          _label('application menu', 0.79),
+        ],
+      );
+
+      expect(explanation.cellId, 'screenshots');
+      expect(explanation.primaryEvidence, contains('user interface'));
+      expect(
+        explanation.matchedKeywords.every(explanation.primaryEvidence.contains),
+        isTrue,
+      );
+    });
+
+    test('exact people pets and food matches remain stable', () {
+      final peopleExplanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'phase2_exact_people_1',
+          filename: 'portrait_day.jpg',
+        ),
+        labels: [_label('person', 0.91), _label('portrait', 0.86)],
+      );
+      final petsExplanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'phase2_exact_pets_1',
+          filename: 'park_walk.jpg',
+        ),
+        labels: [_label('dog', 0.93), _label('puppy', 0.87)],
+      );
+      final foodExplanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'phase2_exact_food_1',
+          filename: 'dinner_table.jpg',
+        ),
+        labels: [_label('food', 0.9), _label('dish', 0.84)],
+      );
+
+      expect(peopleExplanation.cellId, 'people');
+      expect(petsExplanation.cellId, 'pets');
+      expect(foodExplanation.cellId, 'food');
+    });
+
+    test('weak fuzzy risky labels alone cannot create decisive scores', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(
+          id: 'phase2_weak_fuzzy_only_1',
+          filename: 'neutral_frame.jpg',
+        ),
+        labels: [
+          _label('documentary', 0.96),
+          _label('landmarking', 0.92),
+          _label('vacationing', 0.89),
+          _label('basketballer', 0.86),
+          _label('cartoonish', 0.84),
+          _label('capture panel', 0.82),
+        ],
+      );
+
+      final scores = scoringStage.score(analysis);
+      for (final cellId in const [
+        'places',
+        'documents_receipts',
+        'screenshots',
+        'travel',
+        'sports',
+        'animation',
+        'memes',
+      ]) {
+        expect(
+          _scoreForCell(scores, cellId).score,
+          lessThan(KeywordPlacementDefinitions.fallbackThreshold),
+        );
+      }
+
+      final explanation = decisionStage.resolve(
+        analysis: analysis,
+        derived: DerivedSignals.from(analysis),
+        scores: scores,
+      );
+
+      expect(explanation.cellId, 'unsorted');
+      expect(explanation.usedFallback, isTrue);
+    });
+  });
+
+  group('phase 3 screen presentation anti-drift', () {
+    test(
+      'structural UI evidence suppresses Places without requiring new cue families',
+      () {
+        const precedenceStage = VetoPrecedenceStage();
+        const gateStage = CategoryEntryGateStage();
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3_structural_ui_1'),
+          labels: [_label('sky', 0.58), _label('cloud', 0.52)],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.18,
+            fullOcrText: 'agenda q2 review timeline action items notes',
+            lineCount: 2,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: true,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final derived = DerivedSignals.from(analysis);
+        final scores = scoringStage.score(analysis);
+        precedenceStage.apply(scores: scores, analysis: analysis);
+        gateStage.apply(scores: scores, analysis: analysis);
+
+        expect(derived.uiDensityScore, greaterThanOrEqualTo(0.6));
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: derived,
+        );
+        expect(explanation.cellId, isNot('places'));
+        expect(
+          explanation.fallbackReason,
+          UnsortedFallbackReason.lowConfidenceDocument,
+        );
+      },
+    );
+  });
+
+  group('phase 4 places and animal hardening', () {
+    test(
+      'weak place evidence with strong screen presentation evidence vetoes Places',
+      () {
+        const precedenceStage = VetoPrecedenceStage();
+        const gateStage = CategoryEntryGateStage();
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'phase4_screen_place_1'),
+          labels: [
+            _label('monitor', 0.89),
+            _label('presentation', 0.84),
+            _label('sky', 0.43),
+          ],
+        );
+
+        final scores = scoringStage.score(analysis);
+        precedenceStage.apply(scores: scores, analysis: analysis);
+        gateStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'places').vetoed, isTrue);
+      },
+    );
+
+    test('weak scene support by itself does not pass Places gating', () {
+      const gateStage = CategoryEntryGateStage();
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'phase4_weak_scene_1'),
+        labels: [_label('sky', 0.44), _label('cloud', 0.39)],
+      );
+
+      final scores = scoringStage.score(analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      final explanation = decisionStage.resolve(
+        analysis: analysis,
+        derived: DerivedSignals.from(analysis),
+        scores: scores,
+      );
+
+      expect(explanation.cellId, isNot('places'));
+    });
+
+    test(
+      'weak incidental animal presence without direct pet evidence does not select lowConfidenceAnimal',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'phase4_weak_animal_presence_1'),
+          labels: [
+            _label('presentation', 0.86),
+            _label('slides', 0.8),
+            _label('animal', 0.31),
+          ],
+        );
+
+        final explanation = decisionStage.resolve(
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+          scores: scoringStage.score(analysis),
+        );
+
+        expect(
+          explanation.fallbackReason,
+          isNot(UnsortedFallbackReason.lowConfidenceAnimal),
+        );
+      },
+    );
+  });
+
+  group('phase 5 document versus ui boundary', () {
+    test(
+      'text-heavy login page with document-like structure is rejected when ui context is strong',
+      () {
+        const gateStage = CategoryEntryGateStage();
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(
+            id: 'phase5_login_ui_1',
+            filename: 'github_login_monitor.jpg',
+            width: 1440,
+            height: 900,
+          ),
+          labels: [
+            _label('browser', 0.9),
+            _label('website', 0.88),
+            _label('user interface', 0.86),
+            _label('menu', 0.8),
+            _label('document', 0.78),
+            _label('text', 0.74),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.26,
+            fullOcrText: 'github sign in username password forgot password',
+            lineCount: 8,
+            blockCount: 5,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: true,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final routed = routingStage.route(analysis);
+        expect(routed?.cellId, isNot('documents_receipts'));
+
+        final scores = scoringStage.score(analysis);
+        gateStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'documents_receipts').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+          scores: scores,
+        );
+        expect(explanation.cellId, isNot('documents_receipts'));
+      },
+    );
+
+    test(
+      'passport style document with visible face still routes to documents decisively',
+      () {
+        const precedenceStage = VetoPrecedenceStage();
+        const gateStage = CategoryEntryGateStage();
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(
+            id: 'phase5_passport_face_1',
+            filename: 'passport_id_scan.jpg',
+          ),
+          labels: [
+            _label('passport', 0.96),
+            _label('id card', 0.9),
+            _label('face', 0.82),
+            _label('person', 0.76),
+            _label('document', 0.74),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.22,
+            fullOcrText:
+                'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<\n'
+                'l898902c36uto7408122f1204159ze184226b<<<<<10',
+            lineCount: 3,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: true,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        precedenceStage.apply(scores: scores, analysis: analysis);
+        gateStage.apply(scores: scores, analysis: analysis);
+        final explanation = decisionStage.resolve(
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+          scores: scores,
+        );
+
+        expect(explanation.cellId, 'documents_receipts');
+        expect(explanation.score, greaterThanOrEqualTo(1.2));
+        expect(explanation.cellId, isNot('people'));
+      },
+    );
+  });
+
+  group('devices tech furniture guard and dining rescue', () {
+    test(
+      'table furniture and structure labels do not count as dining context cues without food labels',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'dining_context_count_1'),
+          labels: [
+            _label('table', 0.72),
+            _label('furniture', 0.72),
+            _label('structure', 0.76),
+          ],
+        );
+
+        expect(analysis.cueSummary.diningContextCueCount, 0);
+      },
+    );
+
+    test(
+      'table furniture and wood processed labels do not create screen device cues or win Devices Tech',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'device_guard_furniture_1'),
+          labels: [
+            _label('table', 0.72),
+            _label('furniture', 0.72),
+            _label('wood_processed', 0.56),
+          ],
+        );
+
+        expect(analysis.cueSummary.screenDeviceCueCount, 0);
+
+        final explanation = pipeline.explainPlacement(
+          asset: analysis.asset,
+          labels: analysis.scoringLabels,
+        );
+        expect(explanation.cellId, isNot('devices_tech'));
+      },
+    );
+
+    test(
+      'dining context rescue does not fire when only table style labels are present',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'dining_rescue_1'),
+          labels: [
+            _label('structure', 0.76),
+            _label('furniture', 0.72),
+            _label('table', 0.72),
+          ],
+        );
+
+        expect(analysis.cueSummary.diningContextCueCount, 0);
+
+        final scores = scoringStage.score(analysis);
+        final foodScore = _scoreForCell(scores, 'food');
+        final techScore = _scoreForCell(scores, 'devices_tech');
+
+        expect(foodScore.score, lessThanOrEqualTo(techScore.score));
+      },
+    );
+
+    test(
+      'table contributes dining context only when a food cue is already present',
+      () {
+        final analysis = analysisBuilder.build(
+          asset: _imageAsset(id: 'dining_supportive_table_1'),
+          labels: [_label('food', 0.86), _label('table', 0.72)],
+        );
+
+        expect(analysis.cueSummary.foodCueCount, greaterThan(0));
+        expect(analysis.cueSummary.diningContextCueCount, greaterThan(0));
+      },
+    );
+
+    test('tablet computer label still creates a screen device cue', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'tablet_exact_1'),
+        labels: [_label('tablet computer', 0.86)],
+      );
+
+      expect(analysis.cueSummary.screenDeviceCueCount, greaterThan(0));
+    });
+
+    test('table alone contributes zero to Devices Tech', () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'table_only_1'),
+        labels: [_label('table', 0.82)],
+      );
+
+      expect(analysis.cueSummary.screenDeviceCueCount, 0);
+      expect(
+        _scoreForCell(scoringStage.score(analysis), 'devices_tech').score,
+        0,
+      );
+    });
+
+    test('pizza food and table labels still route to Food normally', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'pizza_table_1'),
+        labels: [
+          _label('pizza', 0.92),
+          _label('food', 0.88),
+          _label('table', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'food');
+    });
+  });
+
+  group('subject-first place precedence', () {
+    test('mosque with incidental crowd resolves to Places', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'place_precedence_mosque_crowd_1'),
+        labels: [
+          _label('architecture', 0.93),
+          _label('mosque', 0.9),
+          _label('courtyard', 0.82),
+          _label('crowd', 0.74),
+        ],
+      );
+
+      expect(explanation.cellId, 'places');
+    });
+
+    test('cathedral exterior with tourists resolves to Places', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'place_precedence_cathedral_tourists_1'),
+        labels: [
+          _label('cathedral', 0.92),
+          _label('architecture', 0.88),
+          _label('facade', 0.84),
+          _label('crowd', 0.7),
+        ],
+      );
+
+      expect(explanation.cellId, 'places');
+    });
+
+    test('group selfie in front of mosque stays People', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'place_precedence_group_selfie_1'),
+        labels: [
+          _label('selfie', 0.93),
+          _label('portrait', 0.89),
+          _label('person', 0.84),
+          _label('group', 0.76),
+          _label('mosque', 0.88),
+          _label('architecture', 0.82),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('places'));
+    });
+
+    test('former family photo at landmark resolves to People', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'place_precedence_family_landmark_1'),
+        labels: [
+          _label('family', 0.92),
+          _label('parent', 0.88),
+          _label('child', 0.86),
+          _label('person', 0.84),
+          _label('face', 0.79),
+          _label('group', 0.76),
+          _label('landmark', 0.78),
+          _label('architecture', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('places'));
+    });
+
+    test('close portrait with building background stays People', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'place_precedence_portrait_building_1'),
+        labels: [
+          _label('portrait', 0.91),
+          _label('person', 0.87),
+          _label('face', 0.84),
+          _label('building', 0.8),
+          _label('architecture', 0.76),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('places'));
+    });
+  });
+
+  group('mosque architecture place recovery', () {
+    test(
+      'mosque-like structure arch outdoor sky cluster resolves to Places',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'mosque_arch_recovery_1'),
+          labels: [
+            _label('structure', 0.82),
+            _label('arch', 0.76),
+            _label('outdoor', 0.70),
+            _label('sky', 0.68),
+          ],
+        );
+
+        expect(explanation.cellId, 'places');
+        expect(explanation.cellId, isNot('unsorted'));
+      },
+    );
+
+    test(
+      'generic weak arch outdoor structure without mosque cluster can remain Unsorted',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'generic_arch_weak_scene_1'),
+          labels: [
+            _label('structure', 0.38),
+            _label('arch', 0.34),
+            _label('outdoor', 0.31),
+          ],
+        );
+
+        expect(explanation.cellId, 'unsorted');
+      },
+    );
+
+    test(
+      'explicit mosque token with otherwise generic architecture still prefers Places',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'mosque_explicit_generic_context_1'),
+          labels: [
+            _label('structure', 0.74),
+            _label('outdoor', 0.44),
+            _label('mosque', 0.38),
+          ],
+        );
+
+        expect(explanation.cellId, 'places');
+      },
+    );
+  });
+
+  test('decision stage emits lowConfidenceHuman unsorted reason', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_human_1'),
+      labels: [_label('face', 0.36), _label('person', 0.31)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 0.4,
+          matchedKeywords: {'weak tech cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+    expect(explanation.unsortedReason, UnsortedReason.lowConfidenceHuman);
+  });
+
+  test('decision stage emits lowConfidenceFood unsorted reason', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_food_1'),
+      labels: [_label('dish', 0.31), _label('plate', 0.27)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 0.41,
+          matchedKeywords: {'weak tech cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+    expect(explanation.unsortedReason, UnsortedReason.lowConfidenceFood);
+  });
+
+  test('decision stage emits lowConfidenceScene unsorted reason', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_scene_1'),
+      labels: [_label('landscape', 0.32), _label('sky', 0.28)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 0.39,
+          matchedKeywords: {'weak tech cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+    expect(explanation.unsortedReason, UnsortedReason.lowConfidenceScene);
+  });
+
+  test('decision stage emits ambiguousMulti unsorted reason', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_ambiguous_1'),
+      labels: [_label('technology', 0.3), _label('keyboard', 0.28)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 0.72,
+          matchedKeywords: {'weak tech cue'},
+        ),
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('travel')!,
+          score: 0.67,
+          matchedKeywords: {'weak travel cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+    expect(explanation.unsortedReason, UnsortedReason.ambiguousMulti);
+  });
+
+  test(
+    'decision stage falls back to unsorted when winning margin is too narrow',
+    () {
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'decision_narrow_margin_1'),
+        labels: [_label('texture', 0.23), _label('pattern', 0.21)],
+      );
+
+      final explanation = decisionStage.resolve(
+        analysis: analysis,
+        derived: DerivedSignals.from(analysis),
+        scores: [
+          PlacementScoreCard(
+            rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+            score: 0.96,
+            matchedKeywords: {'screen cue'},
+          ),
+          PlacementScoreCard(
+            rule: KeywordPlacementDefinitions.ruleForCellId('travel')!,
+            score: 0.91,
+            matchedKeywords: {'travel cue'},
+          ),
+        ],
+      );
+
+      expect(explanation.cellId, 'unsorted');
+      expect(explanation.usedFallback, isTrue);
+      expect(explanation.fallbackReason, UnsortedFallbackReason.ambiguousMulti);
+      expect(explanation.topCandidateCellId, 'devices_tech');
+      expect(explanation.topCandidateCellName, 'Devices / Tech');
+      expect(explanation.topCandidateScore, 0.96);
+      expect(explanation.runnerUpCellId, 'travel');
+      expect(explanation.runnerUpCellName, 'Travel');
+      expect(explanation.runnerUpScore, 0.91);
+      expect(explanation.winningMargin, closeTo(0.05, 0.0001));
+      expect(
+        explanation.requiredMargin,
+        KeywordPlacementDefinitions.fallbackMarginThreshold,
+      );
+      expect(
+        explanation.fallbackThreshold,
+        KeywordPlacementDefinitions.fallbackThreshold,
+      );
+      expect(explanation.blockedByMargin, isTrue);
+      expect(explanation.blockedByLowConfidence, isFalse);
+      expect(
+        explanation.finalDecisionSummary,
+        'Unsorted because Devices / Tech only led Travel by 0.05, '
+        'below the 0.10 margin requirement.',
+      );
+      expect(
+        explanation.matchedKeywords,
+        contains('top candidate Devices / Tech'),
+      );
+      expect(explanation.matchedKeywords, contains('runner-up Travel'));
+      expect(explanation.matchedKeywords, contains('margin too narrow 0.05'));
+      expect(explanation.matchedKeywords, contains('required margin 0.10'));
+    },
+  );
+
+  test('decision stage still resolves when winner score is at least 1.0', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_clear_winner_1'),
+      labels: [_label('texture', 0.23), _label('pattern', 0.21)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 1.02,
+          matchedKeywords: {'screen cue'},
+        ),
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('travel')!,
+          score: 0.99,
+          matchedKeywords: {'travel cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'devices_tech');
+    expect(explanation.cellId, isNot('unsorted'));
+  });
+
+  test('decision stage emits noSignal unsorted reason', () {
+    final analysis = analysisBuilder.build(
+      asset: _imageAsset(id: 'decision_none_1'),
+      labels: [_label('texture', 0.23), _label('pattern', 0.21)],
+    );
+
+    final explanation = decisionStage.resolve(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+      scores: [
+        PlacementScoreCard(
+          rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+          score: 0.38,
+          matchedKeywords: {'weak tech cue'},
+        ),
+      ],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+    expect(explanation.unsortedReason, UnsortedReason.noSignal);
+  });
+
+  test('sky label alone does not push an asset into a specific category', () {
+    final explanation = pipeline.explainPlacement(
+      asset: _imageAsset(id: 'phase3a_sky_only_1'),
+      labels: [_label('sky', 0.94)],
+    );
+
+    expect(explanation.cellId, 'unsorted');
+  });
+
+  test(
+    'natural outdoor sky cluster does not leak into screenshots or meme buckets',
+    () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'regression_outdoor_sky_structure_1'),
+        labels: [
+          _label('outdoor', 0.91),
+          _label('sky', 0.91),
+          _label('blue_sky', 0.91),
+          _label('structure', 0.82),
+        ],
+      );
+
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+
+      expect(_scoreForCell(scores, 'screenshots').vetoed, isTrue);
+      expect(_scoreForCell(scores, 'memes').vetoed, isTrue);
+
+      final ranked =
+          scores.where((score) => !score.vetoed).toList(growable: false)
+            ..sort((left, right) => right.score.compareTo(left.score));
+
+      expect(ranked.first.rule.cellId, 'nature');
+      expect(ranked.first.rule.cellId, isNot('screenshots'));
+      expect(ranked[1].rule.cellId, isNot('memes'));
+
+      final explanation = pipeline.explainPlacement(
+        asset: analysis.asset,
+        labels: analysis.scoringLabels,
+      );
+
+      expect(
+        explanation.cellId,
+        anyOf(equals('nature'), equals('places'), equals('unsorted')),
+      );
+      expect(explanation.topCandidateCellId, 'nature');
+      expect(explanation.topCandidateCellId, isNot('screenshots'));
+      expect(explanation.runnerUpCellId, isNot('memes'));
+    },
+  );
+
+  group('people-first precedence', () {
+    test(
+      'tweetScreenshotMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_tweet_subtype_1'),
+          labels: [
+            _label('person', 0.88),
+            _label('portrait', 0.80),
+            _label('face', 0.74),
+            _label('user interface', 0.82),
+            _label('text message', 0.78),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.14,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.12,
+            fullOcrText: 'tweet\nreply\nretweet\nlikes\nviews\nfollow',
+            lineCount: 6,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'socialEmbedMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_social_embed_subtype_1'),
+          labels: [
+            _label('person', 0.84),
+            _label('face', 0.72),
+            _label('user interface', 0.82),
+            _label('message', 0.78),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.12,
+            fullOcrText: 'embedded post\nquote tweet\nfinal score\nscoreboard',
+            lineCount: 6,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'photoTextOverlayMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_overlay_subtype_1'),
+          labels: [
+            _label('person', 0.88),
+            _label('portrait', 0.82),
+            _label('face', 0.76),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.16,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.22,
+            fullOcrText: 'caption\ntext\noverlay\nheadline',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'quoteCardMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_quote_card_subtype_1'),
+          labels: [
+            _label('person', 0.88),
+            _label('portrait', 0.80),
+            _label('face', 0.72),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.20,
+            fullOcrText: 'quote card\npull quote\nmanager quote\npress quote',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'multiPanelMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_multi_panel_subtype_1'),
+          labels: [
+            _label('person', 0.86),
+            _label('face', 0.74),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.18,
+            fullOcrText: 'panel\ntext\npanel\ntext\npanel\ntext',
+            lineCount: 6,
+            blockCount: 3,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'captionedFictionMemeLike beats People-first and routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3b_captioned_fiction_subtype_1'),
+          labels: [
+            _label('person', 0.88),
+            _label('portrait', 0.80),
+            _label('face', 0.72),
+            _label('cartoon', 0.24),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.18,
+            fullOcrText: 'dragon\nfictional character\ncaption\ntext',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        precedenceStage.apply(scores: scores, analysis: analysis);
+
+        expect(_scoreForCell(scores, 'people').vetoed, isTrue);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+        expect(explanation.cellId, 'memes');
+        expect(
+          explanation.fallbackOrDebugReasons,
+          isNot(contains('people-first suppresses meme fallback')),
+        );
+      },
+    );
+
+    test(
+      'cartoon face without human labels routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3a_cartoon_face_structural_1'),
+          labels: [_label('texture', 0.04)],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.08,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.16,
+            fullOcrText: 'caption\ntext\noverlay\nlol',
+            lineCount: 4,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'memes');
+        expect(explanation.cellId, isNot('people'));
+      },
+    );
+
+    test(
+      'photo text overlay routes to Memes even with strong human label',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3a_photo_overlay_1'),
+          labels: [
+            _label('person', 0.82),
+            _label('portrait', 0.78),
+            _label('face', 0.72),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.22,
+            fullOcrText: 'caption\ntext\noverlay\nheadline',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'memes');
+      },
+    );
+
+    test('quote card routes to Memes from structural text', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'phase3a_quote_card_1'),
+        labels: [_label('paper', 0.12)],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.28,
+          fullOcrText: 'quote card\npull quote\nmanager quote\npress quote\nclub crest',
+          lineCount: 5,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'memes');
+    });
+
+    test('real selfie still routes to People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'phase3a_selfie_regression_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('portrait', 0.82),
+          _label('face', 0.76),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.18,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.02,
+          fullOcrText: '',
+          lineCount: 0,
+          blockCount: 0,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('animation_cartoon_meme'));
+    });
+
+    test('real selfie with watermark still routes to People', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'phase3a_selfie_watermark_regression_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('portrait', 0.82),
+          _label('face', 0.76),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.18,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.08,
+          fullOcrText: 'watermark',
+          lineCount: 1,
+          blockCount: 1,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('animation_cartoon_meme'));
+    });
+
+    test(
+      'primary person beats screenshot document and generic poster labels',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _screenshotAsset(
+            id: 'people_first_saved_person_1',
+            filename: 'IMG_saved_person.png',
+          ),
+          labels: [
+            _label('person', 0.9),
+            _label('portrait', 0.86),
+            _label('face', 0.82),
+            _label('screenshot', 0.78),
+            _label('document', 0.74),
+            _label('poster', 0.70),
+            _label('text', 0.68),
+          ],
+        );
+
+        expect(explanation.cellId, 'people');
+        expect(explanation.cellId, isNot('screenshots'));
+        expect(explanation.cellId, isNot('documents_receipts'));
+        expect(explanation.cellId, isNot('animation_cartoon_meme'));
+      },
+    );
+
+    test('confirmed meme poster overlay beats embedded person', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'people_first_meme_overlay_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('portrait', 0.81),
+          _label('meme', 0.78),
+          _label('logo', 0.76),
+          _label('text', 0.74),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.30,
+          fullOcrText: 'headline\nquote\ncaption\nlogo',
+          lineCount: 4,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'memes');
+    });
+
+    test(
+      'single cartoon cue with high graphicness routes to Memes over People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3a_cartoon_strong_1'),
+          labels: [
+            _label('cartoon', 0.92),
+            _label('illustration', 0.74),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.40,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final scores = scoringStage.score(analysis);
+        const precedenceStage = VetoPrecedenceStage();
+        const gateStage = CategoryEntryGateStage();
+
+        precedenceStage.apply(scores: scores, analysis: analysis);
+        gateStage.apply(scores: scores, analysis: analysis);
+
+        final explanation = decisionStage.resolve(
+          scores: scores,
+          analysis: analysis,
+          derived: DerivedSignals.from(analysis),
+        );
+
+        expect(explanation.cellId, 'memes');
+        expect(explanation.cellId, isNot('people'));
+      },
+    );
+
+    test(
+      'cartoon label 0.85 with faceCount 1 routes to Memes not People',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3a_cartoon_face_1'),
+          labels: [
+            _label('cartoon', 0.85),
+            _label('person', 0.72),
+            _label('face', 0.70),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.20,
+            fullOcrText: 'caption\ntext\noverlay',
+            lineCount: 3,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+        expect(explanation.cellId, 'memes');
+        expect(explanation.cellId, isNot('people'));
+      },
+    );
+
+    test(
+      'meme image with face overlay routes to Memes',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'phase3a_meme_face_overlay_1'),
+          labels: [
+            _label('meme', 0.82),
+            _label('person', 0.78),
+            _label('face', 0.72),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.10,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.25,
+            fullOcrText: 'caption\ntext\noverlay\nlol',
+            lineCount: 4,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = routingStage.route(analysis);
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'memes');
+      },
+    );
+
+    test(
+      'real person photo with no animation labels still routes to People',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'phase3a_people_regression_1'),
+          labels: [
+            _label('portrait', 0.92),
+            _label('person', 0.88),
+            _label('face', 0.84),
+          ],
+        );
+
+        expect(explanation.cellId, 'people');
+        expect(explanation.cellId, isNot('animation_cartoon_meme'));
+      },
+    );
+
+    test('identity document evidence beats embedded person', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'people_first_identity_doc_1'),
+        labels: [
+          _label('person', 0.88),
+          _label('portrait', 0.80),
+          _label('id card', 0.86),
+          _label('document', 0.78),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.12,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.18,
+          fullOcrText: 'identity card\nname\nbirth date',
+          lineCount: 3,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'documents_receipts');
+    });
+
+    test('incidental person embedded in dominant UI stays Screenshots', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'people_first_incidental_ui_1',
+          filename: 'Screenshot_chat_profile.png',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('text message', 0.92),
+          _label('user interface', 0.88),
+          _label('notification', 0.82),
+          _label('person', 0.54),
+        ],
+      );
+
+      expect(explanation.cellId, 'screenshots');
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test(
+      'generic poster document text labels do not satisfy Animation hard gate',
+      () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'animation_hard_gate_generic_1'),
+          labels: [
+            _label('poster', 0.9),
+            _label('art', 0.84),
+            _label('document', 0.78),
+            _label('screenshot', 0.76),
+            _label('text', 0.72),
+          ],
+        );
+
+        expect(explanation.cellId, isNot('animation_cartoon_meme'));
+        expect(explanation.topCandidateCellId, isNot('animation_cartoon_meme'));
+      },
+    );
+
+    test('two explicit stylized cues satisfy Animation hard gate', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'animation_hard_gate_explicit_1'),
+        labels: [
+          _label('cartoon', 0.88),
+          _label('meme', 0.82),
+          _label('text', 0.70),
+        ],
+      );
+
+      expect(explanation.cellId, 'memes');
+    });
+  });
+
+  group('graphic poster bridge and broad bias guards', () {
+    AssetAnalysis memeGraphicAnalysis(String id) {
+      return _analysisWithStructural(
+        asset: _imageAsset(id: id, filename: 'shared_card.jpg'),
+        labels: [
+          _label('art', 0.39),
+          _label('illustrations', 0.39),
+          _label('document', 0.24),
+          _label('printed_page', 0.23),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.24,
+          fullOcrText: 'headline\nshort caption\ncall to action',
+          lineCount: 3,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: false,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+    }
+
+    test(
+      'meme graphic art printed page with poster OCR routes to Animation Meme',
+      () {
+        final explanation = routingStage.route(
+          memeGraphicAnalysis('graphic_bridge_meme_1'),
+        );
+
+        expect(explanation, isNotNull);
+        expect(explanation!.cellId, 'memes');
+      },
+    );
+
+    test('invoice-like printed page with receipt OCR routes to Receipts', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'graphic_bridge_document_1'),
+        labels: [
+          _label('document', 0.86),
+          _label('printed_page', 0.78),
+          _label('text', 0.74),
+          _label('paper', 0.70),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.42,
+          fullOcrText:
+              'invoice number 123\nsubtotal 12.00\ntax 2.00\n'
+              'total 14.00\npayment due on receipt',
+          lineCount: 12,
+          blockCount: 5,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: true,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = routingStage.route(analysis);
+
+      expect(explanation, isNotNull);
+      expect(explanation!.cellId, 'receipts');
+    });
+
+    test('sunset outdoor photo does not hit Animation Meme', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'graphic_bridge_sunset_1'),
+        labels: [
+          _label('sunset', 0.92),
+          _label('outdoor', 0.88),
+          _label('sky', 0.84),
+          _label('cloud', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, isNot('animation_cartoon_meme'));
+      expect(explanation.topCandidateCellId, isNot('animation_cartoon_meme'));
+    });
+
+    test('meme graphic broad labels resolve to Animation after gates', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = memeGraphicAnalysis('graphic_bridge_people_guard_1');
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+      final ranked =
+          scores.where((score) => !score.vetoed).toList(growable: false)
+            ..sort((left, right) => right.score.compareTo(left.score));
+
+      expect(ranked.first.rule.cellId, 'documents_receipts');
+    });
+
+    test('meme graphic broad labels cannot leave Travel as top candidate', () {
+      const precedenceStage = VetoPrecedenceStage();
+      const gateStage = CategoryEntryGateStage();
+      final analysis = memeGraphicAnalysis('graphic_bridge_travel_guard_1');
+      final scores = scoringStage.score(analysis);
+      precedenceStage.apply(scores: scores, analysis: analysis);
+      gateStage.apply(scores: scores, analysis: analysis);
+      final ranked =
+          scores.where((score) => !score.vetoed).toList(growable: false)
+            ..sort((left, right) => right.score.compareTo(left.score));
+
+      expect(_scoreForCell(scores, 'travel').vetoed, isTrue);
+      expect(ranked.first.rule.cellId, isNot('travel'));
+      expect(ranked.first.rule.cellId, 'documents_receipts');
+    });
+  });
+
+  group('new category routing', () {
+    test('clear scenery resolves to Nature', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'nature_positive_1',
+          filename: 'beach_sunset.jpg',
+        ),
+        labels: [
+          _label('sunset', 0.92),
+          _label('ocean', 0.88),
+          _label('beach', 0.84),
+          _label('clouds', 0.78),
+        ],
+      );
+
+      expect(explanation.cellId, 'nature');
+      expect(explanation.cellName, 'Nature');
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('Nature does not steal from People when a person is dominant', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'nature_people_guard_1'),
+        labels: [
+          _label('portrait', 0.93),
+          _label('person', 0.88),
+          _label('face', 0.84),
+          _label('sunset', 0.82),
+          _label('ocean', 0.76),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('nature'));
+    });
+
+    test('Nature does not steal from Places when a landmark is dominant', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'nature_places_guard_1'),
+        labels: [
+          _label('architecture', 0.94),
+          _label('landmark', 0.9),
+          _label('building', 0.86),
+          _label('sky', 0.8),
+          _label('sunset', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'places');
+      expect(explanation.cellId, isNot('nature'));
+    });
+
+    test('clear vehicle subject resolves to Cars and Vehicles', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'vehicles_positive_1',
+          filename: 'car_drive.jpg',
+        ),
+        labels: [
+          _label('car', 0.94),
+          _label('vehicle', 0.88),
+          _label('road', 0.76),
+          _label('dashboard', 0.7),
+        ],
+      );
+
+      expect(explanation.cellId, 'vehicles');
+      expect(explanation.cellName, 'Cars');
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('Vehicles does not steal from People when a person is dominant', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'vehicles_people_guard_1'),
+        labels: [
+          _label('selfie', 0.93),
+          _label('person', 0.88),
+          _label('face', 0.84),
+          _label('car', 0.82),
+          _label('vehicle', 0.76),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('vehicles'));
+    });
+
+    test('Vehicles does not steal from Places when a landmark is dominant', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'vehicles_places_guard_1'),
+        labels: [
+          _label('landmark', 0.94),
+          _label('architecture', 0.9),
+          _label('building', 0.86),
+          _label('car', 0.78),
+          _label('road', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'places');
+      expect(explanation.cellId, isNot('vehicles'));
+    });
+
+    test('clear receipt layout resolves to Receipts', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'receipts_positive_1', filename: 'receipt.jpg'),
+        labels: [
+          _label('receipt', 0.9),
+          _label('invoice', 0.84),
+          _label('total', 0.8),
+          _label('payment', 0.72),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.22,
+          fullOcrText:
+              'cashier till\nsubtotal 120.00\nvat 18.00\ntotal 138.00\n'
+              'thank you for your purchase',
+          lineCount: 5,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: true,
+          barcodeCount: 1,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+
+      expect(explanation.cellId, 'receipts');
+      expect(explanation.cellName, 'Receipts');
+      expect(explanation.cellId, isNot('screenshots'));
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('Receipts does not steal from People when a person is dominant', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'receipts_people_guard_1'),
+        labels: [
+          _label('portrait', 0.93),
+          _label('person', 0.88),
+          _label('face', 0.84),
+          _label('receipt', 0.82),
+          _label('total', 0.76),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 1,
+          largestFaceAreaRatio: 0.14,
+          hasSingleLargeFace: true,
+          textCoverageRatio: 0.18,
+          fullOcrText: 'receipt subtotal vat total payment received',
+          lineCount: 4,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: true,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('receipts'));
+    });
+
+    test('Receipts does not steal from Places when a landmark is dominant', () {
+      final analysis = _analysisWithStructural(
+        asset: _imageAsset(id: 'receipts_places_guard_1'),
+        labels: [
+          _label('landmark', 0.94),
+          _label('architecture', 0.9),
+          _label('building', 0.86),
+          _label('receipt', 0.8),
+          _label('total', 0.74),
+        ],
+        structural: const StructuralSignals(
+          faceCount: 0,
+          largestFaceAreaRatio: 0,
+          hasSingleLargeFace: false,
+          textCoverageRatio: 0.18,
+          fullOcrText: 'receipt subtotal vat total payment received',
+          lineCount: 4,
+          blockCount: 2,
+          hasChatLikeLayout: false,
+          hasTableLikeLayout: true,
+          barcodeCount: 0,
+          hasQrCode: false,
+          hasMrzPattern: false,
+        ),
+      );
+
+      final explanation = _resolveAnalysis(analysis);
+
+      expect(explanation.cellId, 'places');
+      expect(explanation.cellId, isNot('receipts'));
+    });
+
+    test(
+      'Receipts does not steal from Documents when MRZ evidence is present',
+      () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'receipts_documents_guard_1'),
+          labels: [
+            _label('passport', 0.96),
+            _label('id card', 0.9),
+            _label('document', 0.84),
+            _label('receipt', 0.76),
+            _label('total', 0.7),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.12,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.22,
+            fullOcrText:
+                'p<utoeriksson<<anna<maria<<<<<<<<<<<<<<<<<<<\n'
+                'l898902c36uto7408122f1204159ze184226b<<<<<10',
+            lineCount: 3,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: true,
+          ),
+        );
+
+        final explanation = _resolveAnalysis(analysis);
+
+        expect(explanation.cellId, 'documents_receipts');
+        expect(explanation.cellId, isNot('receipts'));
+      },
+    );
+  });
+
+  group('confirmed HIVE classification failures', () {
+    test('realHumanFaceNotUnsorted', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_human_face_1'),
+        labels: [
+          _label('face', 0.94),
+          _label('person', 0.9),
+          _label('portrait', 0.88),
+          _label('selfie', 0.84),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('selfieNotPets', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_selfie_not_pets_1'),
+        labels: [
+          _label('selfie', 0.93),
+          _label('face', 0.9),
+          _label('person', 0.87),
+          _label('portrait', 0.84),
+          _label('grass', 0.28),
+          _label('fur', 0.22),
+        ],
+      );
+
+      expect(explanation.cellId, 'people');
+      expect(explanation.cellId, isNot('pets'));
+    });
+
+    test('weakAnimalCueNotPets', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_weak_animal_1'),
+        labels: [
+          _label('grass', 0.38),
+          _label('outdoor', 0.34),
+          _label('park', 0.31),
+        ],
+      );
+
+      expect(explanation.cellId, isNot('pets'));
+    });
+
+    test('jerseyOnlyNotSports', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_jersey_only_1'),
+        labels: [
+          _label('jersey', 0.82),
+          _label('logo', 0.78),
+          _label('apparel', 0.74),
+          _label('shirt', 0.7),
+        ],
+      );
+
+      expect(explanation.cellId, isNot('sports'));
+    });
+
+    test('passportFaceNotPeople', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'regression_passport_face_1',
+          filename: 'passport_mrz_scan.jpg',
+        ),
+        labels: [
+          _label('passport', 0.97),
+          _label('document', 0.9),
+          _label('mrz', 0.88),
+          _label('face', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'documents_receipts');
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test('chatScreenshotNotPeople', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _screenshotAsset(
+          id: 'regression_chat_screenshot_1',
+          filename: 'Screenshot 2026-04-27 at 09.41.10.png',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('user interface', 0.92),
+          _label('text message', 0.88),
+          _label('chat', 0.84),
+          _label('notification', 0.74),
+          _label('face', 0.56),
+        ],
+      );
+
+      expect(explanation.cellId, 'screenshots');
+      expect(explanation.cellId, isNot('people'));
+    });
+
+    test('scoreboardNotPlaces', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'regression_scoreboard_1',
+          filename: 'fixture_vs_2_1_flag_card.jpg',
+        ),
+        labels: [
+          _label('scoreboard', 0.9),
+          _label('league', 0.86),
+          _label('match', 0.82),
+          _label('stadium', 0.76),
+          _label('flag', 0.72),
+        ],
+      );
+
+      expect(explanation.cellId, 'sports');
+      expect(explanation.cellId, isNot('places'));
+    });
+
+    test('mosqueNotPetsOrUnsorted', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_mosque_1'),
+        labels: [
+          _label('architecture', 0.93),
+          _label('mosque', 0.9),
+          _label('dome', 0.82),
+          _label('minaret', 0.8),
+        ],
+      );
+
+      expect(explanation.cellId, 'places');
+      expect(explanation.cellId, isNot('pets'));
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('foodNotUnsorted', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(id: 'regression_food_1'),
+        labels: [
+          _label('dish', 0.88),
+          _label('meal', 0.84),
+          _label('plate', 0.8),
+          _label('food', 0.78),
+          _label('cuisine', 0.74),
+        ],
+      );
+
+      expect(explanation.cellId, 'food');
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('memeNotPetsOrPlaces', () {
+      final explanation = pipeline.explainPlacement(
+        asset: _imageAsset(
+          id: 'regression_meme_1',
+          filename: 'reposted_poster_caption_card.jpg',
+          width: 1179,
+          height: 2556,
+        ),
+        labels: [
+          _label('meme', 0.9),
+          _label('poster', 0.86),
+          _label('graphic design', 0.84),
+          _label('text', 0.82),
+          _label('caption', 0.78),
+        ],
+      );
+
+      expect(explanation.cellId, 'memes');
+      expect(explanation.cellId, isNot('pets'));
+      expect(explanation.cellId, isNot('places'));
+      expect(explanation.cellId, isNot('documents_receipts'));
+      expect(explanation.cellId, isNot('unsorted'));
+    });
+
+    test('unsortedHasReasonCode', () {
+      final cases = [
+        _RegressionCase(
+          name: 'realHumanFaceNotUnsorted',
+          asset: _imageAsset(id: 'reason_human_face_1'),
+          labels: [
+            _label('face', 0.94),
+            _label('person', 0.9),
+            _label('portrait', 0.88),
+            _label('selfie', 0.84),
+          ],
+        ),
+        _RegressionCase(
+          name: 'selfieNotPets',
+          asset: _imageAsset(id: 'reason_selfie_not_pets_1'),
+          labels: [
+            _label('selfie', 0.93),
+            _label('face', 0.9),
+            _label('person', 0.87),
+            _label('portrait', 0.84),
+            _label('grass', 0.28),
+            _label('fur', 0.22),
+          ],
+        ),
+        _RegressionCase(
+          name: 'weakAnimalCueNotPets',
+          asset: _imageAsset(id: 'reason_weak_animal_1'),
+          labels: [
+            _label('grass', 0.38),
+            _label('outdoor', 0.34),
+            _label('park', 0.31),
+          ],
+        ),
+        _RegressionCase(
+          name: 'jerseyOnlyNotSports',
+          asset: _imageAsset(id: 'reason_jersey_only_1'),
+          labels: [
+            _label('jersey', 0.82),
+            _label('logo', 0.78),
+            _label('apparel', 0.74),
+            _label('shirt', 0.7),
+          ],
+        ),
+        _RegressionCase(
+          name: 'passportFaceNotPeople',
+          asset: _imageAsset(
+            id: 'reason_passport_face_1',
+            filename: 'passport_mrz_scan.jpg',
+          ),
+          labels: [
+            _label('passport', 0.97),
+            _label('document', 0.9),
+            _label('mrz', 0.88),
+            _label('face', 0.72),
+          ],
+        ),
+        _RegressionCase(
+          name: 'chatScreenshotNotPeople',
+          asset: _screenshotAsset(
+            id: 'reason_chat_screenshot_1',
+            filename: 'Screenshot 2026-04-27 at 09.41.10.png',
+            width: 1179,
+            height: 2556,
+          ),
+          labels: [
+            _label('user interface', 0.92),
+            _label('text message', 0.88),
+            _label('chat', 0.84),
+            _label('notification', 0.74),
+            _label('face', 0.56),
+          ],
+        ),
+        _RegressionCase(
+          name: 'scoreboardNotPlaces',
+          asset: _imageAsset(
+            id: 'reason_scoreboard_1',
+            filename: 'fixture_vs_2_1_flag_card.jpg',
+          ),
+          labels: [
+            _label('scoreboard', 0.9),
+            _label('league', 0.86),
+            _label('match', 0.82),
+            _label('stadium', 0.76),
+            _label('flag', 0.72),
+          ],
+        ),
+        _RegressionCase(
+          name: 'mosqueNotPetsOrUnsorted',
+          asset: _imageAsset(id: 'reason_mosque_1'),
+          labels: [
+            _label('architecture', 0.93),
+            _label('mosque', 0.9),
+            _label('dome', 0.82),
+            _label('minaret', 0.8),
+          ],
+        ),
+        _RegressionCase(
+          name: 'foodNotUnsorted',
+          asset: _imageAsset(id: 'reason_food_1'),
+          labels: [
+            _label('dish', 0.88),
+            _label('meal', 0.84),
+            _label('plate', 0.8),
+            _label('food', 0.78),
+            _label('cuisine', 0.74),
+          ],
+        ),
+        _RegressionCase(
+          name: 'memeNotPetsOrPlaces',
+          asset: _imageAsset(
+            id: 'reason_meme_1',
+            filename: 'reposted_poster_caption_card.jpg',
+            width: 1179,
+            height: 2556,
+          ),
+          labels: [
+            _label('meme', 0.9),
+            _label('poster', 0.86),
+            _label('graphic design', 0.84),
+            _label('text', 0.82),
+            _label('caption', 0.78),
+          ],
+        ),
+      ];
+
+      for (final regressionCase in cases) {
+        final explanation = pipeline.explainPlacement(
+          asset: regressionCase.asset,
+          labels: regressionCase.labels,
+        );
+        if (explanation.cellId == 'unsorted') {
+          expect(
+            explanation.unsortedReason,
+            isNotNull,
+            reason: regressionCase.name,
+          );
+        }
+      }
+
+      final noSignalAnalysis = analysisBuilder.build(
+        asset: _imageAsset(id: 'reason_no_signal_1'),
+        labels: [_label('texture', 0.23), _label('pattern', 0.21)],
+      );
+      final noSignalExplanation = decisionStage.resolve(
+        analysis: noSignalAnalysis,
+        derived: DerivedSignals.from(noSignalAnalysis),
+        scores: [
+          PlacementScoreCard(
+            rule: KeywordPlacementDefinitions.ruleForCellId('devices_tech')!,
+            score: 0.38,
+            matchedKeywords: {'weak tech cue'},
+          ),
+        ],
+      );
+
+      expect(noSignalExplanation.cellId, 'unsorted');
+      expect(noSignalExplanation.unsortedReason, UnsortedReason.noSignal);
+    });
+
+    group('explicit sample-space regressions (public KeywordPlacementPipeline)', () {
+      test(
+        'sampleSpaceAnimeWeakPeopleWithCartoonLabelsRoutesAnimationNotPeople',
+        () {
+          final analysis = _analysisWithStructural(
+            asset: _imageAsset(id: 'sample_anime_weak_people_1'),
+            labels: [
+              _label('people', 0.40),
+              _label('adult', 0.38),
+              _label('cartoon', 0.72),
+              _label('anime', 0.66),
+              _label('illustration', 0.61),
+            ],
+            structural: const StructuralSignals(
+              faceCount: 1,
+              largestFaceAreaRatio: 0.12,
+              hasSingleLargeFace: false,
+              textCoverageRatio: 0.0,
+              fullOcrText: '',
+              lineCount: 0,
+              blockCount: 0,
+              hasChatLikeLayout: false,
+              hasTableLikeLayout: false,
+              barcodeCount: 0,
+              hasQrCode: false,
+              hasMrzPattern: false,
+            ),
+          );
+
+          final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+          expect(explanation.cellId, isNot('people'));
+          expect(
+            explanation.cellId,
+            anyOf(
+              equals('animation'),
+              equals('animation_cartoon_meme'),
+            ),
+          );
+        },
+      );
+
+      test('sampleSpace3DCartoonCharacterRoutesAnimationFamilyNotPeople', () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(
+            id: 'sample_3d_cartoon_1',
+            filename: 'cgi_figure_studio_render.jpg',
+          ),
+          labels: [
+            _label('cartoon', 0.90),
+            _label('3d render', 0.86),
+            _label('animated character', 0.80),
+            _label('toy', 0.72),
+            _label('figurine', 0.68),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.0,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+        expect(explanation.cellId, isNot('unsorted'));
+        expect(explanation.cellId, isNot('people'));
+        expect(
+          explanation.cellId,
+          anyOf(
+            equals('animation'),
+            equals('animation_cartoon_meme'),
+            equals('memes'),
+          ),
+        );
+      });
+
+      test('sampleSpaceMangaPanelOcrRoutesAnimationFamilyNotDevices', () {
+        // Keep text/light layout below quote-card meme heuristics; rely on OCR
+        // comics vocabulary + stacked labels similar to ambiguous panels.
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'sample_manga_panel_1'),
+          labels: [
+            _label('structure', 0.45),
+            _label('indoor', 0.38),
+            _label('sign', 0.22),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.10,
+            fullOcrText:
+                'serialized anthology shonen comics panel lettering sfx tone',
+            lineCount: 1,
+            blockCount: 1,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+        expect(explanation.cellId, isNot('unsorted'));
+        expect(explanation.cellId, isNot('devices_tech'));
+        expect(explanation.cellId, isNot('people'));
+        expect(
+          explanation.cellId,
+          anyOf(equals('animation'), equals('animation_cartoon_meme')),
+        );
+      });
+
+      test(
+        'sampleSpaceMangaBookCoverOcrRoutesAnimationFamilyNotDocumentsOrDevices',
+        () {
+          final analysis = _analysisWithStructural(
+            asset: _imageAsset(id: 'sample_manga_cover_1'),
+            labels: [
+              _label('text', 0.72),
+              _label('sign', 0.66),
+              _label('book', 0.62),
+              _label('cover', 0.58),
+              _label('hand', 0.44),
+            ],
+            structural: const StructuralSignals(
+              faceCount: 0,
+              largestFaceAreaRatio: 0,
+              hasSingleLargeFace: false,
+              textCoverageRatio: 0.10,
+              fullOcrText:
+                  'edition hero academia shonen jump comics '
+                  'bookstore clearance 30% off vol 24',
+              lineCount: 1,
+              blockCount: 1,
+              hasChatLikeLayout: false,
+              hasTableLikeLayout: false,
+              barcodeCount: 0,
+              hasQrCode: false,
+              hasMrzPattern: false,
+            ),
+          );
+
+          final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+          expect(explanation.cellId, isNot('people'));
+          expect(explanation.cellId, isNot('devices_tech'));
+          expect(explanation.cellId, isNot('documents_receipts'));
+          expect(explanation.cellId, isNot('receipts'));
+          expect(
+            explanation.cellId,
+            anyOf(equals('animation'), equals('animation_cartoon_meme')),
+          );
+        },
+      );
+
+      test('sampleSpaceDominantCarWithSkyRoutesVehiclesNotNatureOrPlaces', () {
+        final explanation = pipeline.explainPlacement(
+          asset: _imageAsset(id: 'sample_car_sky_trees_1'),
+          labels: [
+            _label('car', 0.68),
+            _label('vehicle', 0.62),
+            _label('wheel', 0.55),
+            _label('sky', 0.55),
+            _label('tree', 0.48),
+          ],
+        );
+
+        expect(explanation.cellId, 'vehicles');
+        expect(explanation.cellId, isNot('nature'));
+        expect(explanation.cellId, isNot('places'));
+      });
+
+      test('sampleSpacePhoneScreenWithOnScreenFaceRoutesTechNotPeople', () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'sample_phone_screen_face_1'),
+          labels: [
+            _label('technology', 0.72),
+            _label('display', 0.60),
+            _label('smartphone', 0.58),
+            _label('people', 0.44),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0.05,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.04,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+        expect(explanation.cellId, isNot('people'));
+        expect(
+          explanation.cellId,
+          anyOf(equals('devices_tech'), equals('screenshots')),
+        );
+      });
+
+      test('sampleSpaceMemePosterSportsCaptionRoutesMemesNotAnimation', () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'sample_sports_meme_poster_1'),
+          labels: [
+            _label('meme', 0.91),
+            _label('poster', 0.86),
+            _label('text', 0.82),
+            _label('sports', 0.76),
+            _label('person', 0.70),
+            _label('athlete', 0.62),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 0,
+            largestFaceAreaRatio: 0,
+            hasSingleLargeFace: false,
+            textCoverageRatio: 0.28,
+            fullOcrText:
+                'full time score league fixture\nsaid\nwhen he scores vs before',
+            lineCount: 5,
+            blockCount: 2,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+        expect(explanation.cellId, 'memes');
+        expect(explanation.cellId, isNot('animation'));
+        expect(explanation.cellId, isNot('people'));
+      });
+
+      test('sampleSpaceRealHumanSelfieRegressionRoutesPeople', () {
+        final analysis = _analysisWithStructural(
+          asset: _imageAsset(id: 'sample_real_selfie_1'),
+          labels: [
+            _label('people', 0.88),
+            _label('adult', 0.85),
+            _label('selfie', 0.72),
+          ],
+          structural: const StructuralSignals(
+            faceCount: 1,
+            largestFaceAreaRatio: 0.22,
+            hasSingleLargeFace: true,
+            textCoverageRatio: 0.0,
+            fullOcrText: '',
+            lineCount: 0,
+            blockCount: 0,
+            hasChatLikeLayout: false,
+            hasTableLikeLayout: false,
+            barcodeCount: 0,
+            hasQrCode: false,
+            hasMrzPattern: false,
+          ),
+        );
+
+        expect(pipeline.explainPlacementFromAnalysis(analysis).cellId, 'people');
+      });
+
+      test('sampleSpaceNativeScreenshotRoutesScreenshotsBaseline', () {
+        expect(
+          pipeline
+              .explainPlacement(
+                asset: _screenshotAsset(id: 'sample_screenshot_baseline_1'),
+                labels: [
+                  _label('user interface', 0.90),
+                  _label('text message', 0.84),
+                  _label('notification', 0.72),
+                ],
+              )
+              .cellId,
+          'screenshots',
+        );
+      });
+
+      test('sampleSpaceNativeScreenshotYieldsWhenDominantMemeSignalPresent', () {
+        final explanation = pipeline.explainPlacement(
+          asset: _screenshotAsset(id: 'sample_screenshot_meme_dom_1'),
+          labels: [
+            _label('meme', 0.92),
+            _label('caption', 0.86),
+            _label('user interface', 0.74),
+          ],
+        );
+
+        expect(explanation.cellId, isNot('screenshots'));
+        expect(explanation.cellId, equals('memes'));
+      });
+
+      test('sampleSpaceDessertClusterRoutesFood', () {
+        expect(
+          pipeline
+              .explainPlacement(
+                asset: _imageAsset(id: 'sample_dessert_cluster_1'),
+                labels: [
+                  _label('dessert', 0.55),
+                  _label('food', 0.48),
+                  _label('pastry', 0.52),
+                  _label('donut', 0.46),
+                  _label('confectionery', 0.44),
+                ],
+              )
+              .cellId,
+          'food',
+        );
+      });
+
+      test(
+        'sampleSpaceCoffeePackagingOcrRoutesFoodNotDocumentsMemesDevices',
+        () {
+          final analysis = _analysisWithStructural(
+            asset: _imageAsset(id: 'sample_jacobs_cappuccino_box_2'),
+            labels: [
+              _label('text', 0.65),
+              _label('sign', 0.58),
+              _label('beverage', 0.45),
+            ],
+            structural: const StructuralSignals(
+              faceCount: 0,
+              largestFaceAreaRatio: 0,
+              hasSingleLargeFace: false,
+              textCoverageRatio: 0.22,
+              fullOcrText:
+                  'JACOBS CAPPUCCINO\nreduced sugar\nserving suggestion\ningredients',
+              lineCount: 4,
+              blockCount: 2,
+              hasChatLikeLayout: false,
+              hasTableLikeLayout: false,
+              barcodeCount: 0,
+              hasQrCode: false,
+              hasMrzPattern: false,
+            ),
+          );
+
+          final explanation = pipeline.explainPlacementFromAnalysis(analysis);
+          expect(explanation.cellId, 'food');
+          expect(explanation.cellId, isNot('documents_receipts'));
+          expect(explanation.cellId, isNot('receipts'));
+          expect(explanation.cellId, isNot('memes'));
+          expect(explanation.cellId, isNot('devices_tech'));
+        },
+      );
+    });
+  });
+}
+
+MediaAsset _imageAsset({
+  required String id,
+  String? filename,
+  int width = 1200,
+  int height = 1600,
+}) {
+  return MediaAsset(
+    id: id,
+    type: MediaAssetType.image,
+    createdAt: DateTime(2026, 4, 20, 12),
+    modifiedAt: DateTime(2026, 4, 20, 12),
+    width: width,
+    height: height,
+    originalFilename: filename ?? 'IMG_$id.HEIC',
+  );
+}
+
+MediaAsset _screenshotAsset({
+  required String id,
+  String? filename,
+  int width = 1179,
+  int height = 2556,
+}) {
+  return MediaAsset(
+    id: id,
+    type: MediaAssetType.screenshot,
+    createdAt: DateTime(2026, 4, 20, 12),
+    modifiedAt: DateTime(2026, 4, 20, 12),
+    width: width,
+    height: height,
+    originalFilename: filename ?? 'Screenshot_$id.png',
+  );
+}
+
+ClassificationLabel _label(String name, double confidence) {
+  return ClassificationLabel(
+    id: name,
+    key: name,
+    displayName: name,
+    confidence: confidence,
+    source: ClassificationLabelSource.onDeviceModel,
+    createdAt: DateTime(2026, 4, 20, 12),
+    modelIdentifier: 'test',
+  );
+}
+
+PlacementScoreCard _scoreForCell(
+  List<PlacementScoreCard> scores,
+  String cellId,
+) {
+  return scores.firstWhere((score) => score.rule.cellId == cellId);
+}
+
+AssetMappingExplanation _resolveAnalysis(AssetAnalysis analysis) {
+  const routingStage = ContentTypeRoutingStage();
+  const scoringStage = WeightedCategoryScoringStage();
+  const precedenceStage = VetoPrecedenceStage();
+  const gateStage = CategoryEntryGateStage();
+  const decisionStage = PlacementDecisionStage();
+
+  final routed = routingStage.route(analysis);
+  if (routed != null) {
+    return routed;
+  }
+
+  final scores = scoringStage.score(analysis);
+  precedenceStage.apply(scores: scores, analysis: analysis);
+  gateStage.apply(scores: scores, analysis: analysis);
+  return decisionStage.resolve(
+    scores: scores,
+    analysis: analysis,
+    derived: DerivedSignals.from(analysis),
+  );
+}
+
+class _RegressionCase {
+  const _RegressionCase({
+    required this.name,
+    required this.asset,
+    required this.labels,
+  });
+
+  final String name;
+  final MediaAsset asset;
+  final List<ClassificationLabel> labels;
+}
+
+Future<StructuralSourceImage?> _fakeImageLoader(MediaAsset asset) async {
+  final tempDir = await Directory.systemTemp.createTemp(
+    'hive_pipeline_structural_test_',
+  );
+  final file = File('${tempDir.path}/${asset.id}.jpg');
+  await file.writeAsBytes(const [1, 2, 3]);
+
+  return StructuralSourceImage(
+    filePath: file.path,
+    imageWidth: asset.width > 0 ? asset.width : 1000,
+    imageHeight: asset.height > 0 ? asset.height : 1000,
+    onDispose: () async {
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+    },
+  );
+}
+
+AssetAnalysis _analysisWithStructural({
+  required MediaAsset asset,
+  required List<ClassificationLabel> labels,
+  required StructuralSignals structural,
+}) {
+  final builder = PlacementAnalysisBuilder();
+  return builder.build(asset: asset, labels: labels, structural: structural);
+}

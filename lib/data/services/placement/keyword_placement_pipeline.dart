@@ -1,0 +1,6857 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+
+import '../../../application/models/asset_mapping_explanation.dart';
+import '../../../application/models/structural_signals.dart';
+import '../../../domain/entities/classification_label.dart';
+import '../../../domain/entities/media_asset.dart';
+import '../structural_signal_extractor.dart';
+import 'placement_definitions.dart';
+import 'placement_models.dart';
+
+const Set<String> _strictKeywordMatchCellIds = {
+  'places',
+  'documents_receipts',
+  'screenshots',
+  'travel',
+  'nature',
+  'vehicles',
+  'receipts',
+  'sports',
+  'animation',
+  'memes',
+  'animation_cartoon_meme',
+};
+
+bool _hasAnyTopLabel(AssetAnalysis analysis, Set<String> labels) {
+  final pool = analysis.topLabels.isNotEmpty ? analysis.topLabels : analysis.scoringLabels;
+  for (final label in pool) {
+    final normalized = label.displayName.toLowerCase().trim();
+    if (labels.contains(normalized)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _hasStrongTopLabel(
+  AssetAnalysis analysis,
+  Set<String> labels,
+  double minConfidence,
+) {
+  final pool = analysis.topLabels.isNotEmpty ? analysis.topLabels : analysis.scoringLabels;
+  for (final label in pool) {
+    final normalized = label.displayName.toLowerCase().trim();
+    if (labels.contains(normalized) && label.confidence >= minConfidence) {
+      return true;
+    }
+  }
+  return false;
+}
+
+double _strongestPeopleLikeLabelConfidence(AssetAnalysis analysis) {
+  final pool = analysis.topLabels.isNotEmpty ? analysis.topLabels : analysis.scoringLabels;
+  final peopleLike = <String>{
+    'people',
+    'person',
+    'human',
+    'adult',
+    'face',
+    'portrait',
+    'man',
+    'woman',
+    'child',
+  };
+  var maxC = 0.0;
+  for (final label in pool) {
+    final n = label.displayName.toLowerCase().trim();
+    if (peopleLike.contains(n) && label.confidence > maxC) {
+      maxC = label.confidence;
+    }
+  }
+  return maxC;
+}
+
+bool _structuralOcrHasPackagingFoodCue(StructuralSignals structural) {
+  final ocr = structural.fullOcrText.toLowerCase();
+  for (final t in KeywordPlacementDefinitions.packagingFoodOcrTokens) {
+    if (ocr.contains(t.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _deferDocumentOrGraphicRouteForFoodPackaging(AssetAnalysis analysis) {
+  if (_hasReceiptDocumentEvidence(analysis)) {
+    return false;
+  }
+  if (analysis.structural.hasMrzPattern) {
+    return false;
+  }
+  final summary = analysis.cueSummary;
+  if (!_structuralOcrHasPackagingFoodCue(analysis.structural)) {
+    return false;
+  }
+  return summary.foodCueStrength >= 0.12 ||
+      summary.foodCueCount >= 1 ||
+      summary.strongFoodCueCount >= 1;
+}
+
+bool _skipMemePrecedenceForDevicePhoto(AssetAnalysis analysis) {
+  return analysis.cueSummary.screenDeviceCueCount >= 1 &&
+      analysis.structural.largestFaceAreaRatio < 0.08;
+}
+
+/// Meal/table photos that should not take the graphic-post shortcut to Memes.
+bool _mealPhotoShouldDeferGraphicMemeRoute(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final structural = analysis.structural;
+  if (_deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+    return true;
+  }
+  if (structural.isMemeOrPosterLike || structural.isPhotoQuoteCardMeme) {
+    return false;
+  }
+  return summary.foodCueCount >= 2;
+}
+
+/// Lets meal/packaging/device-camera photos score normally instead of taking the early meme shortcut.
+bool _skipEarlyMemeRouteForFoodOrDevicePhoto(AssetAnalysis analysis) {
+  if (_deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+    return true;
+  }
+  if (_skipMemePrecedenceForDevicePhoto(analysis)) {
+    return true;
+  }
+  final structural = analysis.structural;
+  if (!structural.isMemeOrPosterLike &&
+      !structural.isPhotoQuoteCardMeme &&
+      analysis.cueSummary.foodCueCount >= 2) {
+    return true;
+  }
+  return false;
+}
+
+bool _weakCartoonHumanFaceCase(AssetAnalysis analysis, DerivedSignals derived) {
+  final strongest = _strongestPeopleLikeLabelConfidence(analysis);
+  final ratio = analysis.structural.largestFaceAreaRatio;
+  return analysis.structural.faceCount >= 1 &&
+      ratio < 0.20 &&
+      strongest > 0 &&
+      strongest < 0.55 &&
+      derived.graphicnessScore >= 0.65;
+}
+
+bool _suppressPeopleFirstBoosts(AssetAnalysis analysis, DerivedSignals derived) {
+  final strongest = _strongestPeopleLikeLabelConfidence(analysis);
+  final ratio = analysis.structural.largestFaceAreaRatio;
+  final summary = analysis.cueSummary;
+  final hasMeaningfulStructuralFace =
+      analysis.structural.faceCount >= 1 && ratio >= 0.06;
+  final weakByTopLabels =
+      strongest > 0 && strongest < 0.55 && !hasMeaningfulStructuralFace;
+  final weakByCueAndStructure =
+      summary.peopleCueStrength < 0.55 &&
+      (ratio < 0.06 || summary.screenDeviceCueCount >= 1);
+  final weakCartoonHumanFace = _weakCartoonHumanFaceCase(analysis, derived);
+  final drawnAnimeFaceBypassesWideFace =
+      analysis.structural.faceCount >= 1 &&
+      ratio >= 0.06 &&
+      ratio < 0.20 &&
+      strongest > 0 &&
+      strongest < 0.55 &&
+      summary.animationCueCount >= 1;
+  return weakByTopLabels ||
+      weakByCueAndStructure ||
+      weakCartoonHumanFace ||
+      drawnAnimeFaceBypassesWideFace;
+}
+
+bool _hasVehicleSubjectLabelConfidence55(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.55) {
+      continue;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSet(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.vehicleCueKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _hasStylizedNonPhotoHint(AssetAnalysis analysis) {
+  final pool = analysis.topLabels.isNotEmpty ? analysis.topLabels : analysis.scoringLabels;
+  final hintLabels = <String>{
+    'sign',
+    'structure',
+    'graphic design',
+    'cartoon',
+    'illustration',
+    'illustrations',
+    'art',
+    'artwork',
+    'animation',
+    'animated',
+    'manga',
+    'comic',
+    'drawing',
+    'sketch',
+    'character',
+    'fictional character',
+    'clip art',
+    'digital art',
+  };
+  for (final label in pool) {
+    final n = label.displayName.toLowerCase().trim();
+    if (hintLabels.contains(n) && label.confidence >= 0.10) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _isNonPhotographicArtwork(AssetAnalysis analysis) {
+  final artworkLabels = <String>{
+    'art',
+    'artwork',
+    'illustration',
+    'illustrations',
+    'drawing',
+    'sketch',
+    'line art',
+    'manga',
+    'anime',
+    'comic',
+    'cartoon',
+    'animated',
+    'animation',
+    'animated cartoon',
+    'fictional character',
+    'character design',
+    'clip art',
+    'digital art',
+    'graphic novel',
+    'comic book',
+    '2d art',
+    '2d animation',
+  };
+
+  final hasArtworkTopLabel = _hasStrongTopLabel(analysis, artworkLabels, 0.65);
+  final hasStrongArtOrIllustration = _hasStrongTopLabel(
+        analysis,
+        const {'art', 'illustration', 'illustrations'},
+        0.70,
+      );
+
+  // If art/illustration is truly strong in topLabels, treat it as intrinsic
+  // Animation evidence unless the image is clearly a real human photo.
+  if (hasStrongArtOrIllustration) {
+    final hasRealFaceEvidence =
+        analysis.structural.faceCount >= 1 &&
+        analysis.structural.largestFaceAreaRatio >= 0.08;
+    final hasStrongHumanPhoto = analysis.signals.humanCentered.isStrong;
+
+    // Only let real-photo evidence override if there are no other strong artwork cues.
+    final hasOtherArtwork = _hasAnyTopLabel(
+      analysis,
+      artworkLabels.difference(const {'art', 'illustration', 'illustrations'}),
+    );
+    if (hasRealFaceEvidence && hasStrongHumanPhoto && !hasOtherArtwork) {
+      return false;
+    }
+    return true;
+  }
+
+  // Do not treat animation cue summary alone as non-photographic; it can be
+  // driven by poster/meme/graphic design tokens on real photos.
+  return hasArtworkTopLabel;
+}
+
+bool _hasOverlayMemeEvidence(AssetAnalysis analysis) {
+  final signals = analysis.signals;
+  final structural = analysis.structural;
+  final labels = analysis.scoringLabels;
+  final hasDirectMemeLabel = labels.any((l) {
+    final n = l.displayName.toLowerCase();
+    return (n.contains('meme') && l.confidence >= 0.70) ||
+        (n.contains('reaction image') && l.confidence >= 0.70);
+  });
+  final hasPosterTextCluster = labels.any(
+        (l) => l.displayName.toLowerCase().contains('poster') && l.confidence >= 0.70,
+      ) &&
+      labels.any(
+        (l) => l.displayName.toLowerCase().contains('text') && l.confidence >= 0.70,
+      );
+
+  final baseMeme =
+      signals.hasConfirmedMemeSubtype ||
+      signals.captionOverlayPhotoMemeLike.isModerate ||
+      structural.isPhotoQuoteCardMeme ||
+      signals.quoteCardMemeLike.isModerate ||
+      signals.tweetScreenshotMemeLike.isModerate ||
+      signals.socialEmbedMemeLike.isModerate ||
+      hasDirectMemeLabel ||
+      hasPosterTextCluster;
+
+  // Intrinsic comic/manga dialogue should not be treated as an overlay meme.
+  if (_isNonPhotographicArtwork(analysis)) {
+    return baseMeme;
+  }
+
+  // Photo overlays are memes for real photos.
+  return baseMeme || signals.photoTextOverlayMemeLike.isModerate;
+}
+
+bool _hasProtectedDocumentIdentitySignalStrict(AssetAnalysis analysis) {
+  // Protected documents means ONLY hard document/identity/receipt evidence.
+  final summary = analysis.cueSummary;
+  if (analysis.structural.hasMrzPattern) {
+    return true;
+  }
+  if (summary.identityDocumentCueCount > 0 || summary.receiptCueCount > 0) {
+    return true;
+  }
+  for (final label in analysis.topLabels) {
+    final n = label.displayName.toLowerCase().trim();
+    final c = label.confidence;
+    final isHardDoc = n.contains('passport') ||
+        n.contains('id card') ||
+        n == 'id' ||
+        n.contains('receipt') ||
+        n.contains('invoice');
+    if (isHardDoc && c >= 0.55) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _hasRealHumanSubjectPriority(AssetAnalysis analysis) {
+  // A real People photo needs both face structure and strong human signal.
+  final hasRealFaceEvidence =
+      analysis.structural.faceCount >= 1 &&
+      analysis.structural.largestFaceAreaRatio >= 0.08;
+  final hasPortraitCue = analysis.cueSummary.portraitCueCount > 0;
+  return analysis.signals.humanCentered.isStrong && (hasRealFaceEvidence || hasPortraitCue);
+}
+
+bool _hasDominantVehiclePhotoEvidence(AssetAnalysis analysis) {
+  bool hasStrongLabelOnScoringPool(
+    AssetAnalysis analysis,
+    Set<String> labels,
+    double minConfidence,
+  ) {
+    for (final label in analysis.scoringLabels) {
+      final normalized = label.displayName.toLowerCase().trim();
+      if (labels.contains(normalized) && label.confidence >= minConfidence) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  int countStrongLabelsOnScoringPool(
+    AssetAnalysis analysis,
+    Set<String> labels,
+    double minConfidence,
+  ) {
+    var count = 0;
+    for (final label in analysis.scoringLabels) {
+      final normalized = label.displayName.toLowerCase().trim();
+      if (labels.contains(normalized) && label.confidence >= minConfidence) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  const primaryVehicleLabels = <String>{
+    'car',
+    'cars',
+    'vehicle',
+    'vehicles',
+    'automobile',
+    'motor vehicle',
+    'sedan',
+    'suv',
+    'coupe',
+    'hatchback',
+    'sports car',
+    'supercar',
+    'bmw',
+    'mercedes',
+    'audi',
+    'toyota',
+    'honda',
+    'ford',
+    'motorcycle',
+    'truck',
+  };
+  const partVehicleLabels = <String>{
+    'wheel',
+    'wheels',
+    'tire',
+    'tyre',
+    'rim',
+    'windshield',
+    'hood',
+    'grille',
+    'bumper',
+    'headlight',
+    'license plate',
+  };
+
+  final hasPrimaryVehicle =
+      _hasPrimaryVehicleSubjectCue(analysis) ||
+      hasStrongLabelOnScoringPool(analysis, primaryVehicleLabels, 0.50);
+  final hasPartVehicle =
+      hasStrongLabelOnScoringPool(analysis, partVehicleLabels, 0.48);
+  final vehicleCueCount = countStrongLabelsOnScoringPool(
+    analysis,
+    primaryVehicleLabels.union(partVehicleLabels),
+    0.48,
+  );
+
+  if (_hasOverlayMemeEvidence(analysis) || _hasProtectedDocumentIdentitySignalStrict(analysis)) {
+    return false;
+  }
+  if (_hasRealHumanSubjectPriority(analysis)) {
+    return false;
+  }
+  if (analysis.signals.placeLike.isStrong && _hasLandmarkPlaceAnchor(analysis)) {
+    return false;
+  }
+  if (analysis.cueSummary.screenDeviceCueCount >= 1 &&
+      analysis.structural.largestFaceAreaRatio < 0.08 &&
+      analysis.cueSummary.peopleCueStrength < 0.55) {
+    return false;
+  }
+
+  final loneStrongVehiclePartCandidate =
+      vehicleCueCount == 1 &&
+          hasStrongLabelOnScoringPool(analysis, partVehicleLabels, 0.52) &&
+          !_hasOverlayMemeEvidence(analysis) &&
+          !analysis.signals.humanCentered.isModerate &&
+          !(analysis.signals.placeLike.isStrong &&
+              _hasLandmarkPlaceAnchor(analysis));
+
+  // Primary subject car beats sky/tree fillers in the scoring pool.
+  return hasPrimaryVehicle ||
+      (hasPartVehicle && vehicleCueCount >= 2) ||
+      vehicleCueCount >= 3 ||
+      loneStrongVehiclePartCandidate;
+}
+
+String _ocrLowerPool(AssetAnalysis analysis) =>
+    analysis.structural.fullOcrText.toLowerCase();
+
+bool _ocrContainsAnyCue(String ocr, Iterable<String> phrases) {
+  for (final phrase in phrases) {
+    final trimmed = phrase.trim().toLowerCase();
+    if (trimmed.isEmpty) {
+      continue;
+    }
+    if (ocr.contains(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _scoringLabelsHitAnimationCueSet(
+  AssetAnalysis analysis, {
+  double minConfidence = 0.28,
+}) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < minConfidence) {
+      continue;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSet(
+          normalized: normalized,
+          tokens: tokens,
+          cues: KeywordPlacementDefinitions.animationCueKeywords,
+          matchPolicy: _strictKeywordMatchPolicy,
+        )) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool _filenameHintsAnimatedArtSubject(AssetAnalysis analysis) =>
+    _sharedKeywordMatcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.animationFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+
+bool _isArtworkOrAnimationLike(
+  AssetAnalysis analysis,
+  DerivedSignals derived,
+) {
+  if (_filenameHintsAnimatedArtSubject(analysis)) {
+    return true;
+  }
+  final ocr = _ocrLowerPool(analysis);
+  if (_ocrContainsAnyCue(
+    ocr,
+    const [
+      'anime',
+      'manga',
+      'graphic novel',
+      'shonen jump',
+      'shonen',
+      'comic',
+      'comics',
+      'cartoon studio',
+      'cgi',
+      '3d render',
+      'computer graphics',
+      'my hero academia',
+      'viz media',
+      'marvel comics',
+      'dc comics',
+    ],
+  )) {
+    return true;
+  }
+  if (_scoringLabelsHitAnimationCueSet(analysis)) {
+    return true;
+  }
+
+  final strongest = _strongestPeopleLikeLabelConfidence(analysis);
+  final ratio = analysis.structural.largestFaceAreaRatio;
+  final humanLs = DerivedSignals.humanLikeLabelScore(analysis.scoringLabels);
+  final drawnFaceLikelyAnimated =
+      analysis.structural.faceCount >= 1 &&
+          ratio >= 0.06 &&
+          ratio < 0.20 &&
+          strongest > 0 &&
+          strongest < 0.55 &&
+          humanLs < 0.55 &&
+          (derived.graphicnessScore >= 0.52 ||
+              _scoringLabelsHitAnimationCueSet(
+                analysis,
+                minConfidence: 0.26,
+              ) ||
+              _explicitAnimationCueCount(analysis) >= 1);
+  return drawnFaceLikelyAnimated;
+}
+
+bool _printedPublicationSurfaceCuePresent(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.22) {
+      continue;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSet(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.printedPublicationSurfaceCueKeywords,
+      matchPolicy: _defaultKeywordMatchPolicy,
+    )) {
+      return true;
+    }
+  }
+  final ocr = _ocrLowerPool(analysis);
+  return ocr.contains('publisher') ||
+      ocr.contains('paperback') ||
+      ocr.contains('hardcover') ||
+      ocr.contains('comic con');
+}
+
+bool _mangaOrComicPublicationEvidence(AssetAnalysis analysis) {
+  if (analysis.cueSummary.animationCueCount >= 1) {
+    return true;
+  }
+  if (_filenameHintsAnimatedArtSubject(analysis)) {
+    return true;
+  }
+  final ocr = _ocrLowerPool(analysis);
+  if (_ocrContainsAnyCue(
+    ocr,
+    KeywordPlacementDefinitions.mangaPublicationOcrTokens,
+  )) {
+    return true;
+  }
+
+  final structural = analysis.structural;
+  final structuralAnime = structural.hasAnyToken(const [
+    'my hero academia',
+    'shonen jump',
+    'jump comics',
+    'viz media',
+    'marvel comics',
+    'dc comics',
+    'manga studio',
+    'comics',
+    'comic cover',
+    'graphic novel',
+  ]);
+
+  return structuralAnime;
+}
+
+bool _isPrintedMangaComicCoverLike(AssetAnalysis analysis) =>
+    _printedPublicationSurfaceCuePresent(analysis) &&
+    _mangaOrComicPublicationEvidence(analysis);
+
+bool _isPhoneScreenPhotoLike(
+  AssetAnalysis analysis,
+  DerivedSignals derived,
+) {
+  final summary = analysis.cueSummary;
+  final hasStructuralDeviceCue = summary.screenDeviceCueCount >= 1;
+  var hasTechnologyLabel = false;
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.50) {
+      continue;
+    }
+    final normalized = label.displayName.toLowerCase().trim();
+    switch (normalized) {
+      case 'technology':
+      case 'electronics':
+      case 'smartphone':
+      case 'tablet':
+      case 'monitor':
+      case 'mobile phone':
+      case 'computer':
+      case 'screen':
+      case 'display':
+      case 'laptop':
+      case 'device':
+      case 'phone':
+        hasTechnologyLabel = true;
+    }
+  }
+
+  // Dense OCR/text alone mimics phones for meme posters and packaging scans;
+  // require structural device cues or explicit technology-display labels.
+  final hasDeviceSignal = hasStructuralDeviceCue || hasTechnologyLabel;
+
+  if (!hasDeviceSignal) {
+    return false;
+  }
+
+  final weakPeopleCue = summary.peopleCueStrength < 0.55;
+  final faintFace =
+      analysis.structural.faceCount == 0 ||
+      analysis.structural.largestFaceAreaRatio < 0.08 ||
+      summary.peopleCueStrength < 0.50;
+  final weakPortraitStack =
+      faintFace ||
+      (_strongestPeopleLikeLabelConfidence(analysis) < 0.55 &&
+          summary.peopleCueStrength < 0.55);
+
+  return weakPeopleCue && weakPortraitStack;
+}
+
+bool _hasRealPhysicalTechDeviceEvidence(AssetAnalysis analysis) =>
+    _hasStrongScreenPresentationSupport(
+      analysis: analysis,
+      derived: DerivedSignals.from(analysis),
+    ) ||
+        analysis.scoringLabels.any((label) {
+          if (label.confidence < 0.62) {
+            return false;
+          }
+          final normalized = label.displayName.toLowerCase().trim();
+          return normalized == 'laptop' ||
+              normalized == 'computer' ||
+              normalized == 'desktop computer' ||
+              normalized == 'monitor' ||
+              normalized == 'keyboard' ||
+              normalized == 'workstation' ||
+              normalized == 'ipad';
+        });
+
+bool _isFoodPackagingOrDessertLike(AssetAnalysis analysis) =>
+    _deferDocumentOrGraphicRouteForFoodPackaging(analysis);
+
+bool _shouldPreferMemesOverIllustrationRouting(AssetAnalysis analysis) {
+  for (final label in analysis.topLabels) {
+    final n = label.displayName.toLowerCase().trim();
+    if ((n.contains('meme') || n.contains('reaction image')) &&
+        label.confidence >= 0.62) {
+      return true;
+    }
+    if ((n.contains('internet meme') ||
+            (n.contains('viral') && n.contains('meme'))) &&
+        label.confidence >= 0.55) {
+      return true;
+    }
+  }
+
+  final derived = DerivedSignals.from(analysis);
+  if (!_hasHumanPhotoCueForMemeVersusIllustratedSplit(analysis) &&
+      derived.graphicnessScore >= 0.65 &&
+      !_isPrintedMangaComicCoverLike(analysis) &&
+      analysis.scoringLabels.any((l) {
+        final n = l.displayName.toLowerCase();
+        if (l.confidence < 0.62) {
+          return false;
+        }
+        final isStrongCartoonOrAnimatedSubject =
+            n.contains('cartoon') ||
+            n.contains('animated cartoon') ||
+            n.endsWith(' animation');
+        return isStrongCartoonOrAnimatedSubject || n.contains('meme');
+      })) {
+    return true;
+  }
+
+  return false;
+}
+
+bool _hasHumanPhotoCueForMemeVersusIllustratedSplit(AssetAnalysis analysis) =>
+    analysis.cueSummary.peopleCueCount >= 1 ||
+        analysis.cueSummary.portraitCueCount >= 1;
+
+AssetMappingExplanation?
+_tryRoutePrintedComicIllustratedOrDevicePhoto(AssetAnalysis analysis) {
+  if (_hasProtectedDocumentIdentitySignalStrict(analysis)) {
+    return null;
+  }
+  final derived = DerivedSignals.from(analysis);
+
+  if (!_hasOverlayMemeEvidence(analysis) &&
+      !_shouldPreferMemesOverIllustrationRouting(analysis) &&
+      _isPrintedMangaComicCoverLike(analysis)) {
+    final animationRule = KeywordPlacementDefinitions.ruleForCellId(
+      'animation',
+    )!;
+    return AssetMappingExplanation(
+      cellId: animationRule.cellId,
+      cellName: animationRule.cellName,
+      score: 1.465,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: const ['printed comic or manga cover route'],
+      secondarySupport: const ['content-type routing'],
+    );
+  }
+
+  if (!_hasPeopleFirstEvidence(analysis) &&
+      _isPhoneScreenPhotoLike(analysis, derived)) {
+    final isNativeShot = analysis.asset.type == MediaAssetType.screenshot;
+    final targetRule =
+        KeywordPlacementDefinitions.ruleForCellId(
+          isNativeShot ? 'screenshots' : 'devices_tech',
+        )!;
+    return AssetMappingExplanation(
+      cellId: targetRule.cellId,
+      cellName: targetRule.cellName,
+      score: isNativeShot ? 1.44 : 1.438,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: const ['device screen photo routing'],
+      secondarySupport: const ['content-type routing'],
+    );
+  }
+
+  if (!_hasOverlayMemeEvidence(analysis) &&
+      !_shouldPreferMemesOverIllustrationRouting(analysis) &&
+      !_hasPeopleFirstEvidence(analysis) &&
+      _isArtworkOrAnimationLike(analysis, derived)) {
+    final animationRule = KeywordPlacementDefinitions.ruleForCellId(
+      'animation',
+    )!;
+    return AssetMappingExplanation(
+      cellId: animationRule.cellId,
+      cellName: animationRule.cellName,
+      score: 1.459,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: const ['illustrated subject routing'],
+      secondarySupport: const ['content-type routing'],
+    );
+  }
+
+  return null;
+}
+
+const Set<String> _placeLandmarkAnchorCueKeywords = {
+  'city',
+  'skyline',
+  'street',
+  'building',
+  'architecture',
+  'bridge',
+  'house',
+  'venue',
+  'stadium',
+  'arena',
+  'courtyard',
+  'plaza',
+  'temple',
+  'church',
+  'tower',
+  'landmark',
+  'mosque',
+  'cathedral',
+  'monument',
+  'palace',
+  'facade',
+  'interior',
+  'lobby',
+  'atrium',
+  'auditorium',
+  'minaret',
+  'masjid',
+  'prayer hall',
+  'mihrab',
+};
+
+const Set<String> _vehicleContextOnlyCueKeywords = {
+  'wheel',
+  'wheels',
+  'tyre',
+  'tires',
+  'engine',
+  'dashboard',
+  'steering wheel',
+  'road',
+  'highway',
+  'motorway',
+  'parking',
+  'garage',
+  'dealership',
+  'exhaust',
+  'headlight',
+  'bonnet',
+  'bumper',
+  'racing',
+  'rally',
+};
+
+const Set<String> _explicitAnimationCueKeywords = {
+  'cartoon',
+  'animation',
+  'anime',
+  'animated cartoon',
+  'illustration',
+  'drawing',
+  'graphic design',
+  'comic',
+  'meme',
+  'sticker',
+  'mascot',
+  'clip art',
+  'fictional character',
+  'digital art',
+  'sketch',
+  'doodle',
+  'avatar',
+  'pixel art',
+};
+
+const KeywordMatchPolicy _defaultKeywordMatchPolicy = KeywordMatchPolicy();
+const KeywordMatchPolicy _strictKeywordMatchPolicy = KeywordMatchPolicy(
+  substringScore: 0.12,
+  partialTokenOverlapScore: 0.08,
+  weakTokenOverlapScore: 0.04,
+  weakMatchContributionCap: 0.18,
+  allowWeakFuzzyCueMatch: false,
+  allowWeakFuzzyPrimaryEvidence: false,
+);
+
+const Set<String> _devicesTechExcludedLabels = {
+  'table',
+  'tables',
+  'furniture',
+  'wood processed',
+  'desk',
+  'surface',
+  'floor',
+  'ceiling',
+  'wall',
+};
+
+const PlacementKeywordMatcher _sharedKeywordMatcher = PlacementKeywordMatcher();
+
+KeywordMatchPolicy _keywordMatchPolicyForCell(String cellId) {
+  if (_strictKeywordMatchCellIds.contains(cellId)) {
+    return _strictKeywordMatchPolicy;
+  }
+
+  return _defaultKeywordMatchPolicy;
+}
+
+int _naturalSceneCueCount(List<ClassificationLabel> labels) {
+  var count = 0;
+  for (final label in labels) {
+    if (label.confidence < 0.30) {
+      continue;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.naturalSceneCueKeywords,
+    )) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+double _naturalSceneCueStrength(List<ClassificationLabel> labels) {
+  var strength = 0.0;
+  for (final label in labels) {
+    if (label.confidence < 0.30) {
+      continue;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.naturalSceneCueKeywords,
+    )) {
+      strength += label.confidence;
+    }
+  }
+
+  return strength;
+}
+
+bool _hasNaturalSceneCluster(AssetAnalysis analysis) {
+  return _naturalSceneCueCount(analysis.scoringLabels) >= 2 &&
+      _naturalSceneCueStrength(analysis.scoringLabels) >= 1.20;
+}
+
+bool _hasFilenameCue(AssetAnalysis analysis, Set<String> cues) {
+  return _sharedKeywordMatcher.matchesFilenameCue(
+    normalizedFilename: analysis.normalizedFilename,
+    filenameTokens: analysis.filenameTokens,
+    cues: cues,
+    matchPolicy: _strictKeywordMatchPolicy,
+  );
+}
+
+bool _hasLandmarkPlaceAnchor(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.22) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: _placeLandmarkAnchorCueKeywords,
+    )) {
+      return true;
+    }
+  }
+
+  return _hasFilenameCue(analysis, _placeLandmarkAnchorCueKeywords);
+}
+
+bool _hasPrimaryVehicleSubjectCue(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.50) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    final isVehicleCue = _sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.vehicleCueKeywords,
+    );
+    final isContextOnlyCue = _sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: _vehicleContextOnlyCueKeywords,
+    );
+    if (isVehicleCue && !isContextOnlyCue) {
+      return true;
+    }
+  }
+
+  return _hasFilenameCue(
+    analysis,
+    KeywordPlacementDefinitions.vehicleFilenameKeywords,
+  );
+}
+
+int _structuralOcrCueCount(AssetAnalysis analysis, Set<String> cues) {
+  final normalizedText = _sharedKeywordMatcher.normalize(
+    analysis.structural.fullOcrText,
+  );
+  if (normalizedText.isEmpty) {
+    return 0;
+  }
+
+  final tokens = _sharedKeywordMatcher.tokenize(normalizedText);
+  var count = 0;
+  for (final cue in cues) {
+    final normalizedCue = _sharedKeywordMatcher.normalize(cue);
+    final cueTokens = _sharedKeywordMatcher.tokenize(normalizedCue);
+    if (normalizedText.contains(normalizedCue) ||
+        (cueTokens.isNotEmpty && cueTokens.difference(tokens).isEmpty)) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+int _receiptOcrTokenCount(AssetAnalysis analysis) {
+  return _structuralOcrCueCount(
+    analysis,
+    KeywordPlacementDefinitions.receiptStructuralOcrKeywords,
+  );
+}
+
+bool _hasReceiptStructuralLayout(AssetAnalysis analysis) {
+  final structural = analysis.structural;
+  return structural.isDocumentLike ||
+      structural.hasTableLikeLayout ||
+      structural.barcodeCount > 0 ||
+      structural.hasQrCode ||
+      (structural.textCoverageRatio >= 0.08 && structural.lineCount >= 2);
+}
+
+bool _hasReceiptDocumentEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final hasReceiptEvidence =
+      summary.receiptCueCount > 0 ||
+      _receiptOcrTokenCount(analysis) > 0 ||
+      _hasFilenameCue(
+        analysis,
+        KeywordPlacementDefinitions.receiptFilenameKeywords,
+      );
+
+  return hasReceiptEvidence &&
+      _hasReceiptStructuralLayout(analysis) &&
+      !analysis.structural.hasMrzPattern &&
+      summary.identityDocumentCueCount == 0;
+}
+
+bool _hasStrongReceiptEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  if (_hasReceiptDocumentEvidence(analysis)) {
+    return true;
+  }
+
+  return summary.receiptCueCount >= 2 &&
+      summary.receiptCueStrength >= 1.12 &&
+      !analysis.structural.hasMrzPattern &&
+      summary.identityDocumentCueCount == 0;
+}
+
+bool _hasStrongNatureEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final hasNatureFilenameCue = _hasFilenameCue(
+    analysis,
+    KeywordPlacementDefinitions.natureFilenameKeywords,
+  );
+
+  return (summary.natureCueCount >= 2 && summary.natureCueStrength >= 1.20) ||
+      (summary.natureCueCount >= 3 && summary.natureCueStrength >= 1.05) ||
+      summary.natureCueStrength >= 1.45 ||
+      (hasNatureFilenameCue &&
+          summary.natureCueCount >= 2 &&
+          summary.natureCueStrength >= 0.90);
+}
+
+bool _hasStrongVehicleEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final hasVehicleFilenameCue = _hasFilenameCue(
+    analysis,
+    KeywordPlacementDefinitions.vehicleFilenameKeywords,
+  );
+  final hasPrimaryVehicleSubjectCue = _hasPrimaryVehicleSubjectCue(analysis);
+
+  return (hasPrimaryVehicleSubjectCue && summary.vehicleCueStrength >= 0.72) ||
+      (summary.vehicleCueCount >= 2 && summary.vehicleCueStrength >= 1.0) ||
+      (hasVehicleFilenameCue &&
+          summary.vehicleCueCount > 0 &&
+          summary.vehicleCueStrength >= 0.42);
+}
+
+int _mosqueArchitectureCueCount(AssetAnalysis analysis) {
+  var count = 0;
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.22) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+          normalized: normalized,
+          tokens: tokens,
+          cues: KeywordPlacementDefinitions.mosqueArchitectureCueKeywords,
+        ) ||
+        _sharedKeywordMatcher.matchesCueSetStrict(
+          normalized: normalized,
+          tokens: tokens,
+          cues:
+              KeywordPlacementDefinitions.mosqueArchitectureSupportCueKeywords,
+        )) {
+      count += 1;
+    }
+  }
+
+  if (_sharedKeywordMatcher.matchesFilenameCue(
+    normalizedFilename: analysis.normalizedFilename,
+    filenameTokens: analysis.filenameTokens,
+    cues: KeywordPlacementDefinitions.mosqueArchitectureCueKeywords,
+    matchPolicy: _strictKeywordMatchPolicy,
+  )) {
+    count += 1;
+  }
+
+  return count;
+}
+
+bool _hasDirectMosqueArchitectureCue(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.22) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.mosqueArchitectureCueKeywords,
+    )) {
+      return true;
+    }
+  }
+
+  return _sharedKeywordMatcher.matchesFilenameCue(
+    normalizedFilename: analysis.normalizedFilename,
+    filenameTokens: analysis.filenameTokens,
+    cues: KeywordPlacementDefinitions.mosqueArchitectureCueKeywords,
+    matchPolicy: _strictKeywordMatchPolicy,
+  );
+}
+
+int _mosqueArchitectureSupportCueCount(AssetAnalysis analysis) {
+  var count = 0;
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.22) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.mosqueArchitectureSupportCueKeywords,
+    )) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+bool _hasArchitecturalContextLabel(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.30) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (normalized == 'structure' ||
+        normalized == 'architectural structure' ||
+        tokens.contains('architecture') ||
+        tokens.contains('building')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool _hasMosqueArchitecturePlaceEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final signals = analysis.signals;
+  final derived = DerivedSignals.from(analysis);
+  final directCue = _hasDirectMosqueArchitectureCue(analysis);
+  final supportCueCount = _mosqueArchitectureSupportCueCount(analysis);
+  final hasSupportCluster =
+      supportCueCount >= 2 ||
+      (supportCueCount > 0 &&
+          _hasNaturalSceneCluster(analysis) &&
+          _hasArchitecturalContextLabel(analysis));
+  final hasMosqueCue = directCue || hasSupportCluster;
+  final hasSceneContext =
+      directCue ||
+      summary.placeCueCount > 0 ||
+      summary.strongPlaceCueCount > 0 ||
+      signals.scenePlaceStrength.isPresent ||
+      _hasNaturalSceneCluster(analysis);
+
+  if (!hasMosqueCue || !hasSceneContext) {
+    return false;
+  }
+
+  if (_hasScreenPresentationAntiDriftEvidence(
+        analysis: analysis,
+        derived: derived,
+      ) ||
+      signals.documentLike.isStrong ||
+      signals.graphicPostLike.isStrong ||
+      analysis.structural.isDocumentLike ||
+      analysis.structural.isMemeOrPosterLike) {
+    return false;
+  }
+
+  return true;
+}
+
+bool _hasScreenshotRankingEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final signals = analysis.signals;
+  final hasScreenshotFilenameCue = _sharedKeywordMatcher.matchesFilenameCue(
+    normalizedFilename: analysis.normalizedFilename,
+    filenameTokens: analysis.filenameTokens,
+    cues: KeywordPlacementDefinitions.screenshotFilenameKeywords,
+    matchPolicy: _strictKeywordMatchPolicy,
+  );
+
+  return analysis.asset.type == MediaAssetType.screenshot ||
+      hasScreenshotFilenameCue ||
+      summary.screenshotCueCount > 0 ||
+      summary.strictChatUiCueCount > 0 ||
+      summary.chatUiCueCount > 0 ||
+      signals.uiDensity.isStrong ||
+      analysis.structural.isChatLike ||
+      derived.uiDensityScore >= 0.60;
+}
+
+bool _hasAnimationRankingEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  return _hasAnimationHardGateEvidence(analysis);
+}
+
+int _explicitAnimationCueCount(AssetAnalysis analysis) {
+  var count = 0;
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.18) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: _explicitAnimationCueKeywords,
+    )) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+double _maxScoringLabelConfidence(AssetAnalysis analysis) {
+  if (analysis.scoringLabels.isEmpty) {
+    return 0;
+  }
+  var maxConfidence = 0.0;
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence > maxConfidence) {
+      maxConfidence = label.confidence;
+    }
+  }
+  return maxConfidence;
+}
+
+bool _weakMultiLabelStructuralComposition(AssetAnalysis analysis) {
+  final meaningful =
+      analysis.scoringLabels.where((l) => l.confidence >= 0.28).toList();
+  if (meaningful.length < 2) {
+    return false;
+  }
+  return meaningful.every((l) => l.confidence < 0.42);
+}
+
+bool _onlyWeakAbstractVisualLabels(AssetAnalysis analysis) {
+  const cues = {'texture', 'pattern', 'material', 'surface', 'abstract'};
+  if (analysis.scoringLabels.isEmpty) {
+    return false;
+  }
+  return analysis.scoringLabels.every((label) {
+    if (label.confidence >= 0.36) {
+      return false;
+    }
+    final normalized =
+        _sharedKeywordMatcher.normalize(label.displayName).trim();
+    return cues.contains(normalized);
+  });
+}
+
+/// Weak outdoor / built-environment Vision clusters (arch, outdoor, generic
+/// structure) without stylized cues should not hard-route through flat-panel /
+/// graphic-meme shortcuts — those paths are for manga-like panels.
+bool _suppressLikelyNonPhotoFlatPanelForWeakBuiltEnvironment(
+  AssetAnalysis analysis,
+) {
+  final summary = analysis.cueSummary;
+  if (summary.animationCueCount > 0 || _explicitAnimationCueCount(analysis) > 0) {
+    return false;
+  }
+  if (summary.directPetCueCount > 0) {
+    return true;
+  }
+  if (summary.travelCueCount > 0 || summary.travelContextCueCount > 0) {
+    return true;
+  }
+  if (_onlyWeakAbstractVisualLabels(analysis)) {
+    return true;
+  }
+  final maxConf = _maxScoringLabelConfidence(analysis);
+  if (maxConf >= 0.42 && !_weakMultiLabelStructuralComposition(analysis)) {
+    // Strong singles include chat UI, sports venues, and paperwork — not manga-style flat panels.
+    if (summary.chatUiCueCount > 0 ||
+        summary.strictChatUiCueCount > 0 ||
+        summary.presentationCueCount > 0 ||
+        summary.screenDeviceCueCount > 0 ||
+        summary.screenshotCueCount > 0 ||
+        summary.documentCueCount > 0 ||
+        summary.receiptCueCount > 0 ||
+        summary.identityDocumentCueCount > 0 ||
+        summary.strongSportsCueCount > 0 ||
+        summary.sportsContextCueCount > 0 ||
+        (summary.weakSportsCueCount > 0 &&
+            summary.strongSportsCueCount == 0 &&
+            summary.sportsContextCueCount == 0 &&
+            summary.logoTextApparelCueCount >= 1)) {
+      return true;
+    }
+    return false;
+  }
+  final hasLooseNaturalSceneHit = analysis.scoringLabels.any((label) {
+    if (label.confidence < 0.28) {
+      return false;
+    }
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    return _sharedKeywordMatcher.matchesCueSet(
+      normalized: normalized,
+      tokens: tokens,
+      cues: KeywordPlacementDefinitions.naturalSceneCueKeywords,
+      matchPolicy: _defaultKeywordMatchPolicy,
+    );
+  });
+  return hasLooseNaturalSceneHit ||
+      summary.natureCueStrength >= 0.18 ||
+      summary.placeCueStrength >= 0.18;
+}
+
+bool _hasAnimationHardGateEvidence(AssetAnalysis analysis) {
+  final derived = DerivedSignals.from(analysis);
+  final hasCartoonFaceEvidence =
+      derived.graphicnessScore >= 0.65 &&
+      analysis.structural.faceCount >= 1 &&
+      analysis.cueSummary.peopleCueStrength < 0.35;
+  final packagingFoodOcr = _structuralOcrHasPackagingFoodCue(analysis.structural);
+  final humanLs = DerivedSignals.humanLikeLabelScore(analysis.scoringLabels);
+  final likelyNonPhotoFlatPanel =
+      !packagingFoodOcr &&
+      analysis.structural.faceCount == 0 &&
+      humanLs < 0.30 &&
+      analysis.cueSummary.peopleCueStrength < 0.35 &&
+      derived.graphicnessScore >= 0.68 &&
+      !_suppressLikelyNonPhotoFlatPanelForWeakBuiltEnvironment(analysis);
+  final structuralMangaComicOcr = analysis.structural.hasAnyToken(const [
+    'manga',
+    'anime',
+    'shonen',
+    'shonen jump',
+    'comic',
+    'comics',
+    'graphic novel',
+  ]);
+  return analysis.structural.isMemeOrPosterLike ||
+      _explicitAnimationCueCount(analysis) >= 2 ||
+      hasCartoonFaceEvidence ||
+      likelyNonPhotoFlatPanel ||
+      (structuralMangaComicOcr && derived.graphicnessScore >= 0.65);
+}
+
+bool _hasPeopleFirstEvidence(AssetAnalysis analysis) {
+  final summary = analysis.cueSummary;
+  final strictHumanCueCount = _strictCueCount(analysis, {
+    ...KeywordPlacementDefinitions.peopleCueKeywords,
+    ...KeywordPlacementDefinitions.familyCueKeywords,
+  });
+  final strictHumanCueStrength = _strictCueStrength(analysis, {
+    ...KeywordPlacementDefinitions.peopleCueKeywords,
+    ...KeywordPlacementDefinitions.familyCueKeywords,
+  });
+  final strictPortraitCueCount = _strictCueCount(
+    analysis,
+    KeywordPlacementDefinitions.portraitCueKeywords,
+  );
+  final hasStructuralPrimaryFace =
+      analysis.structural.hasSingleLargeFace ||
+      analysis.structural.largestFaceAreaRatio >= 0.10;
+
+  return hasStructuralPrimaryFace ||
+      strictHumanCueCount >= 2 ||
+      strictHumanCueStrength >= 0.96 ||
+      (strictPortraitCueCount >= 1 && strictHumanCueStrength >= 0.78) ||
+      (summary.portraitCueCount >= 1 &&
+          summary.peopleCueStrength >= 0.78 &&
+          strictHumanCueCount >= 1);
+}
+
+bool _hasConfirmedMemePosterOverlay(AssetAnalysis analysis) {
+  return analysis.structural.isMemeOrPosterLike &&
+      (analysis.cueSummary.logoTextApparelCueCount >= 1 ||
+          analysis.structural.textCoverageRatio > 0.12);
+}
+
+bool _hasIdentityDocumentEvidence(AssetAnalysis analysis) {
+  return analysis.structural.hasMrzPattern ||
+      analysis.cueSummary.identityDocumentCueCount >= 1;
+}
+
+int _strictCueCount(AssetAnalysis analysis, Set<String> cues) {
+  var count = 0;
+  for (final label in analysis.scoringLabels) {
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: cues,
+    )) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+double _strictCueStrength(AssetAnalysis analysis, Set<String> cues) {
+  var strength = 0.0;
+  for (final label in analysis.scoringLabels) {
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (_sharedKeywordMatcher.matchesCueSetStrict(
+      normalized: normalized,
+      tokens: tokens,
+      cues: cues,
+    )) {
+      strength += label.confidence;
+    }
+  }
+
+  return strength;
+}
+
+/// Strong portrait clusters on a dominant human subject beat the screenshot
+/// media-type handicap; incidental UI screenshots keep the native screenshot boost.
+bool _suppressScreenshotAssetTypeBoostForPortraitFirstSubject(
+  AssetAnalysis analysis,
+) {
+  if (analysis.asset.type != MediaAssetType.screenshot) {
+    return false;
+  }
+  if (!_hasPeopleFirstEvidence(analysis)) {
+    return false;
+  }
+
+  final peopleStrict = _strictCueStrength(analysis, {
+    ...KeywordPlacementDefinitions.peopleCueKeywords,
+    ...KeywordPlacementDefinitions.familyCueKeywords,
+  });
+  final portraitStrict = _strictCueStrength(
+    analysis,
+    KeywordPlacementDefinitions.portraitCueKeywords,
+  );
+  final cluster = peopleStrict + portraitStrict;
+  return cluster >= 2.12;
+}
+
+bool _isPersonIncidentalInUi({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final structural = analysis.structural;
+  final hasUiContext =
+      analysis.asset.type == MediaAssetType.screenshot ||
+      structural.isChatLike ||
+      summary.strictChatUiCueCount > 0 ||
+      summary.chatUiCueCount > 0 ||
+      analysis.signals.screenshotLike.isStrong ||
+      derived.uiDensityScore >= 0.72;
+  final screenshotClearlyDominates =
+      summary.screenshotCueStrength >= summary.peopleCueStrength + 0.28 &&
+      summary.screenshotCueStrength >= 0.78;
+  final personDoesNotFillFrame =
+      !structural.hasSingleLargeFace &&
+      structural.largestFaceAreaRatio < 0.10 &&
+      summary.portraitCueCount <= 1;
+
+  return hasUiContext && screenshotClearlyDominates && personDoesNotFillFrame;
+}
+
+bool _isNaturalSceneWithoutUiDocumentGraphicEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final hasDocumentFilenameCue = _sharedKeywordMatcher.matchesFilenameCue(
+    normalizedFilename: analysis.normalizedFilename,
+    filenameTokens: analysis.filenameTokens,
+    cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+    matchPolicy: _strictKeywordMatchPolicy,
+  );
+
+  return _hasNaturalSceneCluster(analysis) &&
+      isNaturalPhoto(analysis, derived) &&
+      !_hasScreenshotRankingEvidence(analysis: analysis, derived: derived) &&
+      !_hasAnimationRankingEvidence(analysis: analysis, derived: derived) &&
+      !_hasMeaningfulDocumentEvidence(
+        analysis: analysis,
+        derived: derived,
+        hasDocumentFilenameCue: hasDocumentFilenameCue,
+      );
+}
+
+bool _hasStructuralScreenPresentationEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final structural = analysis.structural;
+
+  return structural.isChatLike ||
+      derived.uiDensityScore >= 0.6 ||
+      (derived.graphicnessScore >= 0.45 &&
+          structural.textCoverageRatio >= 0.12 &&
+          structural.lineCount >= 3);
+}
+
+bool _hasScreenPresentationAntiDriftEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+
+  return _hasStructuralScreenPresentationEvidence(
+        analysis: analysis,
+        derived: derived,
+      ) ||
+      summary.screenDeviceCueCount > 0 ||
+      summary.presentationCueCount > 0;
+}
+
+bool _hasStrongScreenPresentationSupport({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final hasStructuralEvidence = _hasStructuralScreenPresentationEvidence(
+    analysis: analysis,
+    derived: derived,
+  );
+
+  return summary.screenDeviceCueCount >= 2 ||
+      (summary.presentationCueCount > 0 &&
+          (hasStructuralEvidence || summary.screenDeviceCueCount > 0)) ||
+      (summary.screenDeviceCueCount > 0 && hasStructuralEvidence);
+}
+
+bool _hasMeaningfulPlaceEvidence({
+  required CueSummary summary,
+  required AnalysisSignals signals,
+}) {
+  return summary.strongPlaceCueCount > 0 ||
+      summary.strongPlaceCueStrength >= 0.82 ||
+      signals.scenePlaceStrength.isStrong ||
+      (summary.placeCueCount >= 2 && summary.placeCueStrength >= 0.95) ||
+      summary.placeCueStrength >= 1.15;
+}
+
+bool _hasMeaningfulAnimalFallbackEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final signals = analysis.signals;
+  final hasSuppressedContext =
+      _hasScreenPresentationAntiDriftEvidence(
+        analysis: analysis,
+        derived: derived,
+      ) ||
+      signals.uiDensity.isStrong ||
+      signals.graphicPostLike.isModerate;
+
+  if (summary.directPetCueCount >= 2) {
+    return true;
+  }
+
+  if (summary.directPetCueCount == 0) {
+    return false;
+  }
+
+  if (summary.directPetCueStrength < 0.68 && !signals.animalPresence.isStrong) {
+    return false;
+  }
+
+  if (hasSuppressedContext && summary.directPetCueStrength < 0.9) {
+    return false;
+  }
+
+  if (signals.humanPresence.isModerate &&
+      summary.directPetCueCount < 2 &&
+      summary.directPetCueStrength <= signals.humanPresence.score + 0.08) {
+    return false;
+  }
+
+  return true;
+}
+
+bool _hasUiLikeNonDocumentContext({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final signals = analysis.signals;
+  final structural = analysis.structural;
+
+  return signals.screenshotLike.isStrong ||
+      signals.uiDensity.isStrong ||
+      structural.isChatLike ||
+      summary.strictChatUiCueCount > 0 ||
+      summary.screenDeviceCueCount > 0 ||
+      summary.presentationCueCount > 0 ||
+      (summary.screenshotCueCount > 0 && structural.textCoverageRatio >= 0.08);
+}
+
+bool _hasDecisiveDocumentEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+}) {
+  final summary = analysis.cueSummary;
+  final structural = analysis.structural;
+
+  return structural.hasMrzPattern ||
+      summary.identityDocumentCueCount > 0 ||
+      summary.documentCopyCueCount >= 2 ||
+      (summary.documentCopyCueCount > 0 &&
+          (summary.documentCueStrength >= 0.92 ||
+              structural.isDocumentLike ||
+              structural.hasTableLikeLayout ||
+              structural.barcodeCount > 0 ||
+              structural.hasQrCode)) ||
+      (structural.isDocumentLike &&
+          (structural.barcodeCount > 0 || structural.hasQrCode) &&
+          (summary.documentCueCount > 0 || derived.documentnessScore >= 0.86));
+}
+
+bool _hasMeaningfulDocumentEvidence({
+  required AssetAnalysis analysis,
+  required DerivedSignals derived,
+  required bool hasDocumentFilenameCue,
+}) {
+  final summary = analysis.cueSummary;
+  final structural = analysis.structural;
+  final hasUiLikeNonDocumentContext = _hasUiLikeNonDocumentContext(
+    analysis: analysis,
+    derived: derived,
+  );
+
+  if (_hasDecisiveDocumentEvidence(analysis: analysis, derived: derived)) {
+    return true;
+  }
+
+  if (hasUiLikeNonDocumentContext) {
+    return false;
+  }
+
+  return (structural.isDocumentLike &&
+          structural.hasTableLikeLayout &&
+          (summary.documentCueCount > 0 ||
+              derived.documentnessScore >= 0.82)) ||
+      (summary.documentCueCount >= 2 && summary.documentCueStrength >= 1.06) ||
+      (hasDocumentFilenameCue &&
+          (summary.documentCueCount > 0 || structural.isDocumentLike)) ||
+      (structural.isDocumentLike &&
+          derived.documentnessScore >= 0.88 &&
+          summary.documentCueStrength >= 0.72);
+}
+
+bool _hasArtOrIllustrationCue(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.18) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (normalized == 'art' ||
+        normalized == 'illustration' ||
+        normalized == 'illustrations' ||
+        normalized == 'artwork' ||
+        normalized == 'drawing' ||
+        normalized == 'graphic design' ||
+        tokens.contains('illustration') ||
+        tokens.contains('illustrations')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool _hasDocumentOrPrintedPageCue(AssetAnalysis analysis) {
+  for (final label in analysis.scoringLabels) {
+    if (label.confidence < 0.18) {
+      continue;
+    }
+
+    final normalized = _sharedKeywordMatcher.normalize(label.displayName);
+    final tokens = _sharedKeywordMatcher.tokenize(normalized);
+    if (normalized == 'document' ||
+        normalized == 'printed page' ||
+        normalized == 'page' ||
+        normalized == 'poster' ||
+        normalized == 'flyer' ||
+        (tokens.contains('printed') && tokens.contains('page'))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool _hasPosterLikeTextLayout(StructuralSignals structural) {
+  if (structural.isMemeOrPosterLike) {
+    return true;
+  }
+
+  if (structural.faceCount > 0 ||
+      structural.textCoverageRatio < 0.12 ||
+      structural.blockCount < 2 ||
+      structural.lineCount < 2) {
+    return false;
+  }
+
+  if (structural.lineCount <= 8) {
+    return true;
+  }
+
+  final lines = structural.fullOcrText
+      .split('\n')
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList(growable: false);
+  if (lines.length < 2 || lines.length > 8) {
+    return false;
+  }
+
+  final averageLineLength =
+      lines.fold<int>(0, (total, line) => total + line.length) / lines.length;
+  return averageLineLength <= 42;
+}
+
+bool _hasPlainDocumentLayout(AssetAnalysis analysis) {
+  final structural = analysis.structural;
+  if (structural.hasMrzPattern ||
+      structural.hasTableLikeLayout ||
+      structural.barcodeCount > 0 ||
+      structural.hasQrCode) {
+    return true;
+  }
+
+  return !_hasArtOrIllustrationCue(analysis) &&
+      structural.textCoverageRatio >= 0.30 &&
+      structural.lineCount >= 8 &&
+      structural.blockCount >= 3;
+}
+
+bool _hasPosterArtDocumentBridge(AssetAnalysis analysis) {
+  if (!_hasArtOrIllustrationCue(analysis) ||
+      !_hasDocumentOrPrintedPageCue(analysis)) {
+    return false;
+  }
+
+  final summary = analysis.cueSummary;
+  final structural = analysis.structural;
+  final hasHardDocumentEvidence =
+      structural.hasMrzPattern ||
+      structural.hasTableLikeLayout ||
+      structural.barcodeCount > 0 ||
+      structural.hasQrCode ||
+      summary.identityDocumentCueCount > 0;
+  if (hasHardDocumentEvidence) {
+    return false;
+  }
+
+  if (_hasPosterLikeTextLayout(analysis.structural)) {
+    return true;
+  }
+
+  return !analysis.signals.documentLike.isStrong &&
+      analysis.cueSummary.identityDocumentCueCount == 0;
+}
+
+class KeywordPlacementPipeline {
+  KeywordPlacementPipeline({
+    PlacementAnalysisBuilder? analysisBuilder,
+    ContentTypeRoutingStage routingStage = const ContentTypeRoutingStage(),
+    WeightedCategoryScoringStage scoringStage =
+        const WeightedCategoryScoringStage(),
+    VetoPrecedenceStage precedenceStage = const VetoPrecedenceStage(),
+    CategoryEntryGateStage gateStage = const CategoryEntryGateStage(),
+    PlacementDecisionStage decisionStage = const PlacementDecisionStage(),
+  }) : _analysisBuilder = analysisBuilder ?? PlacementAnalysisBuilder(),
+       _routingStage = routingStage,
+       _scoringStage = scoringStage,
+       _precedenceStage = precedenceStage,
+       _gateStage = gateStage,
+       _decisionStage = decisionStage;
+
+  final PlacementAnalysisBuilder _analysisBuilder;
+  final ContentTypeRoutingStage _routingStage;
+  final WeightedCategoryScoringStage _scoringStage;
+  final VetoPrecedenceStage _precedenceStage;
+  final CategoryEntryGateStage _gateStage;
+  final PlacementDecisionStage _decisionStage;
+
+  List<PlacementCellRule> get rules => KeywordPlacementDefinitions.rules;
+  PlacementCellRule get unsortedRule =>
+      KeywordPlacementDefinitions.unsortedRule;
+  int get maxExplanationLabels =>
+      KeywordPlacementDefinitions.maxExplanationLabels;
+
+  PlacementCellRule? ruleForCellId(String cellId) {
+    return KeywordPlacementDefinitions.ruleForCellId(cellId);
+  }
+
+  Future<void> primeStructuralSignals({required MediaAsset asset}) async {
+    await _analysisBuilder.primeStructuralSignals(asset);
+  }
+
+  AssetMappingExplanation explainPlacement({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+  }) {
+    final analysis = _analysisBuilder.build(asset: asset, labels: labels);
+    return _explainFromAnalysis(analysis);
+  }
+
+  /// Full pipeline run with caller-provided structural signals (tests / probes).
+  AssetMappingExplanation explainPlacementFromAnalysis(AssetAnalysis analysis) {
+    return _explainFromAnalysis(analysis);
+  }
+
+  Future<AssetMappingExplanation> explainPlacementAsync({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+  }) async {
+    final analysis = await _analysisBuilder.buildAsync(
+      asset: asset,
+      labels: labels,
+    );
+    return _explainFromAnalysis(analysis);
+  }
+
+  AssetMappingExplanation _explainFromAnalysis(AssetAnalysis analysis) {
+    // ignore: unused_local_variable
+    final derivedSignals = DerivedSignals.from(analysis);
+
+    // keyword_placement_pipeline.dart
+
+    final contentRoute = _routingStage.route(analysis);
+    if (contentRoute != null) {
+      return contentRoute;
+    }
+
+    if (analysis.topLabels.isEmpty) {
+      return AssetMappingExplanation(
+        cellId: unsortedRule.cellId,
+        cellName: unsortedRule.cellName,
+        score: 0,
+        usedFallback: true,
+        topLabels: const [],
+        fallbackOrDebugReasons: const [
+          'no classification signal',
+          'fallback noSignal',
+        ],
+        fallbackReason: UnsortedFallbackReason.noSignal,
+        blockedByMargin: false,
+        blockedByLowConfidence: true,
+        requiredMargin: KeywordPlacementDefinitions.fallbackMarginThreshold,
+        fallbackThreshold: KeywordPlacementDefinitions.fallbackThreshold,
+        finalDecisionSummary:
+            'Unsorted because no category had enough usable evidence.',
+      );
+    }
+    // keyword_placement_pipeline.dart
+
+    void applyNaturalPhotoPenalty(List<PlacementScoreCard> scores) {
+      const naturalPhotoCellIds = {
+        'people',
+        'pets',
+        'food',
+        'sports',
+        'travel',
+        'places',
+        'nature',
+      };
+
+      for (final score in scores) {
+        if (!naturalPhotoCellIds.contains(score.rule.cellId)) {
+          continue;
+        }
+
+        // Packaged-food scans look document-heavy structurally but are still Food.
+        if (score.rule.cellId == 'food' &&
+            _deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+          continue;
+        }
+
+        final keepPeopleForPrimarySubject =
+            score.rule.cellId == 'people' &&
+            _hasPeopleFirstEvidence(analysis) &&
+            !_hasIdentityDocumentEvidence(analysis) &&
+            !_hasConfirmedMemePosterOverlay(analysis) &&
+            !_isPersonIncidentalInUi(
+              analysis: analysis,
+              derived: derivedSignals,
+            );
+        if (keepPeopleForPrimarySubject) {
+          continue;
+        }
+
+        score.score -= 40;
+        score.fallbackOrDebugReasons.add('natural photo gate penalty');
+      }
+    }
+    // keyword_placement_pipeline.dart
+
+    final scores = _scoringStage.score(analysis);
+    _precedenceStage.apply(scores: scores, analysis: analysis);
+
+    if (!isNaturalPhoto(analysis, derivedSignals)) {
+      applyNaturalPhotoPenalty(scores);
+    }
+
+    _gateStage.apply(scores: scores, analysis: analysis);
+    return _decisionStage.resolve(
+      scores: scores,
+      analysis: analysis,
+      derived: derivedSignals,
+    );
+  }
+}
+
+class PlacementAnalysisBuilder {
+  PlacementAnalysisBuilder({
+    StructuralSignalExtractor? structuralExtractor,
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+    SubjectSignalStage subjectSignalStage = const SubjectSignalStage(),
+    StructuredAnalysisSignalStage signalStage =
+        const StructuredAnalysisSignalStage(),
+  }) : _structuralExtractor =
+           structuralExtractor ?? StructuralSignalExtractor(),
+       _matcher = matcher,
+       _subjectSignalStage = subjectSignalStage,
+       _signalStage = signalStage;
+
+  static const _emptyStructuralSignals = StructuralSignals(
+    faceCount: 0,
+    largestFaceAreaRatio: 0,
+    hasSingleLargeFace: false,
+    textCoverageRatio: 0,
+    fullOcrText: '',
+    lineCount: 0,
+    blockCount: 0,
+    hasChatLikeLayout: false,
+    hasTableLikeLayout: false,
+    barcodeCount: 0,
+    hasQrCode: false,
+    hasMrzPattern: false,
+  );
+  static const _structuralTimeout = Duration(seconds: 3);
+
+  final StructuralSignalExtractor _structuralExtractor;
+  final PlacementKeywordMatcher _matcher;
+  final SubjectSignalStage _subjectSignalStage;
+  final StructuredAnalysisSignalStage _signalStage;
+  final Map<String, Future<StructuralSignals>> _structuralByAssetKey = {};
+
+  AssetAnalysis build({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+    StructuralSignals structural = _emptyStructuralSignals,
+  }) {
+    final sortedLabels = List<ClassificationLabel>.from(labels)
+      ..sort((left, right) => right.confidence.compareTo(left.confidence));
+    final topLabels = sortedLabels
+        .take(KeywordPlacementDefinitions.maxExplanationLabels)
+        .toList(growable: false);
+    final scoringLabels = sortedLabels
+        .take(KeywordPlacementDefinitions.maxScoringLabels)
+        .toList(growable: false);
+    final normalizedFilename = _matcher.normalize(asset.originalFilename ?? '');
+    final filenameTokens = _matcher.tokenize(normalizedFilename);
+    final cueSummary = _subjectSignalStage.summarize(scoringLabels);
+
+    return AssetAnalysis(
+      asset: asset,
+      topLabels: topLabels,
+      scoringLabels: scoringLabels,
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cueSummary: cueSummary,
+      signals: _signalStage.build(
+        asset: asset,
+        cueSummary: cueSummary,
+        structural: structural,
+        normalizedFilename: normalizedFilename,
+        filenameTokens: filenameTokens,
+      ),
+      structural: structural,
+    );
+  }
+
+  Future<void> primeStructuralSignals(MediaAsset asset) async {
+    await _resolveStructuralSignals(asset);
+  }
+
+  Future<AssetAnalysis> buildAsync({
+    required MediaAsset asset,
+    required List<ClassificationLabel> labels,
+  }) async {
+    final structural = await _resolveStructuralSignals(asset);
+    return build(asset: asset, labels: labels, structural: structural);
+  }
+
+  Future<StructuralSignals> _resolveStructuralSignals(MediaAsset asset) {
+    final cacheKey = _structuralCacheKey(asset);
+    return _structuralByAssetKey.putIfAbsent(
+      cacheKey,
+      () => _extractStructuralSignals(asset),
+    );
+  }
+
+  Future<StructuralSignals> _extractStructuralSignals(MediaAsset asset) async {
+    final stopwatch = Stopwatch()..start();
+
+    try {
+      return await _structuralExtractor
+          .extract(asset)
+          .timeout(_structuralTimeout, onTimeout: StructuralSignals.empty);
+    } catch (error, stackTrace) {
+      if (kDebugMode) {
+        debugPrint(
+          'PlacementAnalysisBuilder: structural extraction failed for '
+          '${asset.id}: $error',
+        );
+        debugPrintStack(stackTrace: stackTrace);
+      }
+      return StructuralSignals.empty();
+    } finally {
+      stopwatch.stop();
+      if (kDebugMode) {
+        debugPrint(
+          'PlacementAnalysisBuilder: structural extraction for ${asset.id} '
+          'completed in ${stopwatch.elapsedMilliseconds}ms',
+        );
+      }
+    }
+  }
+
+  String _structuralCacheKey(MediaAsset asset) {
+    return '${asset.id}:${asset.modifiedAt.millisecondsSinceEpoch}';
+  }
+}
+
+class StructuredAnalysisSignalStage {
+  const StructuredAnalysisSignalStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  AnalysisSignals build({
+    required MediaAsset asset,
+    required CueSummary cueSummary,
+    required StructuralSignals structural,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+  }) {
+    int cueHitCount(String text, Set<String> cues) {
+      if (text.isEmpty) {
+        return 0;
+      }
+      var hits = 0;
+      for (final cue in cues) {
+        if (text.contains(cue)) {
+          hits++;
+        }
+      }
+      return hits;
+    }
+
+    final hasDocumentFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasScreenshotFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.screenshotFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasAnimationFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.animationFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasPlaceFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.placeFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasScreenAspect =
+        asset.width > 0 &&
+        asset.height > 0 &&
+        (asset.width - asset.height).abs() > 180;
+
+    final uiScore =
+        cueSummary.screenshotCueStrength +
+        cueSummary.chatUiCueStrength +
+        (cueSummary.strictChatUiCueCount * 0.34) +
+        (hasScreenshotFilenameCue ? 0.62 : 0) +
+        ((hasScreenAspect &&
+                (cueSummary.screenshotCueCount > 0 ||
+                    cueSummary.chatUiCueCount > 0 ||
+                    hasScreenshotFilenameCue))
+            ? 0.08
+            : 0);
+    final uiStrong =
+        hasScreenshotFilenameCue ||
+        cueSummary.strictChatUiCueCount > 0 ||
+        cueSummary.chatUiCueStrength >= 0.95 ||
+        cueSummary.screenshotCueStrength >= 1.0;
+    final uiModerate =
+        uiStrong ||
+        cueSummary.chatUiCueCount > 0 ||
+        cueSummary.screenshotCueCount > 0;
+
+    final humanScore =
+        cueSummary.peopleCueStrength +
+        (cueSummary.portraitCueCount * 0.28) +
+        (cueSummary.groupPeopleCueCount * 0.14) +
+        (cueSummary.crowdCueCount * 0.1);
+    final humanStrong =
+        cueSummary.peopleCueCount >= 2 ||
+        cueSummary.peopleCueStrength >= 0.96 ||
+        cueSummary.portraitCueCount >= 2 ||
+        (cueSummary.portraitCueCount > 0 &&
+            cueSummary.peopleCueStrength >= 0.78);
+    final humanModerate =
+        humanStrong ||
+        (cueSummary.portraitCueCount > 0 && cueSummary.peopleCueCount > 0) ||
+        (cueSummary.portraitCueCount > 0 &&
+            cueSummary.peopleCueStrength >= 0.68);
+
+    final petScore = math.max(
+      0.0,
+      cueSummary.directPetCueStrength +
+          (cueSummary.directPetCueCount * 0.12) -
+          (humanModerate ? 0.22 : 0) -
+          (cueSummary.animationCueCount > 0 ? 0.16 : 0) -
+          (cueSummary.logoTextApparelCueCount > 0 ? 0.08 : 0),
+    );
+    final petStrong =
+        cueSummary.directPetCueCount >= 2 ||
+        cueSummary.directPetCueStrength >= 1.05;
+    final petModerate =
+        petStrong ||
+        (cueSummary.directPetCueCount > 0 &&
+            cueSummary.directPetCueStrength >= 0.56);
+
+    final graphicDocumentConflict =
+        cueSummary.animationCueCount > 0 &&
+        cueSummary.logoTextApparelCueCount > 0 &&
+        cueSummary.identityDocumentCueCount == 0 &&
+        cueSummary.documentCopyCueCount == 0;
+    final documentScore = math.max(
+      0.0,
+      cueSummary.documentCueStrength +
+          (cueSummary.identityDocumentCueCount * 0.75) +
+          (cueSummary.documentCopyCueCount * 0.36) +
+          (hasDocumentFilenameCue ? 0.58 : 0) -
+          (uiModerate &&
+                  cueSummary.identityDocumentCueCount == 0 &&
+                  cueSummary.documentCopyCueCount == 0
+              ? 0.12
+              : 0) -
+          (graphicDocumentConflict ? 0.28 : 0),
+    );
+    final documentStrong =
+        cueSummary.identityDocumentCueCount > 0 ||
+        cueSummary.documentCopyCueCount >= 2 ||
+        (hasDocumentFilenameCue && cueSummary.documentCueCount > 0) ||
+        (cueSummary.documentCueStrength >= 1.0 && !graphicDocumentConflict);
+    final documentModerate =
+        documentStrong ||
+        cueSummary.documentCueCount > 0 ||
+        hasDocumentFilenameCue ||
+        cueSummary.documentCopyCueCount > 0;
+
+    final graphicScore =
+        (hasAnimationFilenameCue ? 0.55 : 0) +
+        (cueSummary.animationCueCount * 0.28) +
+        (cueSummary.logoTextApparelCueCount * 0.16) +
+        (cueSummary.sportsGraphicCueCount * 0.18) +
+        (uiModerate &&
+                (cueSummary.animationCueCount > 0 ||
+                    cueSummary.logoTextApparelCueCount >= 2)
+            ? 0.16
+            : 0) +
+        ((hasScreenshotFilenameCue &&
+                (cueSummary.animationCueCount > 0 ||
+                    cueSummary.logoTextApparelCueCount >= 2))
+            ? 0.24
+            : 0);
+    final graphicStrong =
+        hasAnimationFilenameCue ||
+        cueSummary.animationCueCount >= 1 ||
+        (cueSummary.animationCueCount > 0 &&
+            cueSummary.logoTextApparelCueCount > 0) ||
+        ((hasScreenshotFilenameCue ||
+                cueSummary.strictChatUiCueCount > 0 ||
+                cueSummary.screenshotCueStrength >= 0.95) &&
+            (cueSummary.animationCueCount > 0 ||
+                cueSummary.logoTextApparelCueCount >= 2)) ||
+        (cueSummary.sportsGraphicCueCount > 0 &&
+            (cueSummary.logoTextApparelCueCount > 0 ||
+                cueSummary.animationCueCount > 0 ||
+                cueSummary.strictChatUiCueCount > 0 ||
+                cueSummary.screenshotCueCount > 0));
+    final structuralGraphicnessProxy = math.min(
+      math.max(structural.textCoverageRatio * 2.0, structural.isMemeOrPosterLike ? 0.85 : 0.0),
+      1.0,
+    );
+    final animationSingleCueGraphicStrong =
+        cueSummary.animationCueCount >= 1 && structuralGraphicnessProxy >= 0.65;
+    final graphicStrongWithDerivedSupport =
+        graphicStrong || animationSingleCueGraphicStrong;
+    final graphicModerate =
+        graphicStrongWithDerivedSupport ||
+        cueSummary.animationCueCount > 0 ||
+        cueSummary.logoTextApparelCueCount >= 2 ||
+        cueSummary.sportsGraphicCueCount > 0;
+
+    final placeScore = math.max(
+      0.0,
+      cueSummary.placeCueStrength +
+          (cueSummary.strongPlaceCueStrength * 0.78) +
+          (hasPlaceFilenameCue ? 0.36 : 0) -
+          (uiStrong ? 0.18 : 0) -
+          (humanStrong && cueSummary.strongPlaceCueCount == 0 ? 0.1 : 0),
+    );
+    final placeStrong =
+        hasPlaceFilenameCue ||
+        cueSummary.strongPlaceCueCount > 0 ||
+        cueSummary.strongPlaceCueStrength >= 0.82 ||
+        cueSummary.placeCueStrength >= 1.0 ||
+        (cueSummary.placeCueCount >= 3 &&
+            cueSummary.placeCueStrength >= 1.05 &&
+            !uiStrong);
+    final placeModerate =
+        placeStrong ||
+        (cueSummary.placeCueCount > 0 &&
+            cueSummary.placeCueStrength >= 0.58 &&
+            !uiStrong) ||
+        cueSummary.strongPlaceCueCount > 0;
+
+    final sportsGraphicScore =
+        cueSummary.sportsGraphicCueStrength +
+        (cueSummary.sportsGraphicCueCount * 0.16) +
+        (cueSummary.logoTextApparelCueCount > 0 ? 0.12 : 0) +
+        (cueSummary.animationCueCount > 0 ? 0.12 : 0);
+    final sportsGraphicStrong =
+        cueSummary.sportsGraphicCueCount > 0 &&
+        (cueSummary.logoTextApparelCueCount > 0 ||
+            cueSummary.animationCueCount > 0 ||
+            cueSummary.strongSportsCueCount > 0 ||
+            cueSummary.weakSportsCueCount > 0);
+    final sportsGraphicModerate =
+        sportsGraphicStrong || cueSummary.sportsGraphicCueCount > 0;
+
+    final humanPresenceSignal = PlacementSignal(
+      score: humanScore,
+      evidenceCount:
+          cueSummary.peopleCueCount +
+          cueSummary.portraitCueCount +
+          cueSummary.groupPeopleCueCount,
+      isModerate: humanModerate,
+      isStrong: humanStrong,
+    );
+    final animalPresenceSignal = PlacementSignal(
+      score: petScore,
+      evidenceCount: cueSummary.directPetCueCount,
+      isModerate: petModerate,
+      isStrong: petStrong,
+    );
+    final documentnessSignal = PlacementSignal(
+      score: documentScore,
+      evidenceCount:
+          cueSummary.documentCueCount +
+          cueSummary.identityDocumentCueCount +
+          cueSummary.documentCopyCueCount +
+          (hasDocumentFilenameCue ? 1 : 0),
+      isModerate: documentModerate,
+      isStrong: documentStrong,
+    );
+    final uiDensitySignal = PlacementSignal(
+      score: uiScore,
+      evidenceCount:
+          cueSummary.screenshotCueCount +
+          cueSummary.chatUiCueCount +
+          cueSummary.strictChatUiCueCount +
+          (hasScreenshotFilenameCue ? 1 : 0),
+      isModerate: uiModerate,
+      isStrong: uiStrong,
+    );
+    final graphicMemeSignal = PlacementSignal(
+      score: graphicScore,
+      evidenceCount:
+          cueSummary.animationCueCount +
+          cueSummary.logoTextApparelCueCount +
+          cueSummary.sportsGraphicCueCount +
+          (hasAnimationFilenameCue ? 1 : 0),
+      isModerate: graphicModerate,
+      isStrong: graphicStrongWithDerivedSupport,
+    );
+
+    final ocrText = structural.fullOcrText.toLowerCase();
+    final tweetHits = cueHitCount(
+      ocrText,
+      KeywordPlacementDefinitions.tweetScreenshotMemeCueKeywords,
+    );
+    final socialHits = cueHitCount(
+      ocrText,
+      KeywordPlacementDefinitions.socialEmbedMemeCueKeywords,
+    );
+    final quoteHits = cueHitCount(
+      ocrText,
+      KeywordPlacementDefinitions.quoteCardMemeCueKeywords,
+    );
+    final fictionHits = cueHitCount(
+      ocrText,
+      KeywordPlacementDefinitions.captionedFictionMemeCueKeywords,
+    );
+
+    final tweetScreenshotMemeLike = PlacementSignal(
+      score: (tweetHits > 0 && uiModerate) ? 1.0 : 0.0,
+      evidenceCount: tweetHits,
+      isModerate: tweetHits > 0,
+      isStrong: tweetHits > 0 && uiStrong,
+    );
+    final socialEmbedMemeLike = PlacementSignal(
+      score: (socialHits > 0 && uiModerate) ? 0.95 : 0.0,
+      evidenceCount: socialHits,
+      isModerate: socialHits > 0,
+      isStrong: socialHits > 0 && uiStrong,
+    );
+
+    final overlayStrong =
+        (!structural.hasChatLikeLayout &&
+            (structural.isMemeOrPosterLike ||
+                (!structural.hasTableLikeLayout &&
+                    structural.textCoverageRatio >= 0.22 &&
+                    structural.lineCount >= 3)));
+    final overlayModerate =
+        overlayStrong ||
+        (!structural.hasChatLikeLayout &&
+            !structural.hasTableLikeLayout &&
+            structural.textCoverageRatio >= 0.14 &&
+            structural.lineCount >= 2);
+    final photoTextOverlayMemeLike = PlacementSignal(
+      score: overlayStrong ? 1.0 : (overlayModerate ? 0.7 : 0.0),
+      evidenceCount: overlayModerate ? 1 : 0,
+      isModerate: overlayModerate,
+      isStrong: overlayStrong,
+    );
+
+    final quoteCardMemeLike = PlacementSignal(
+      score: (quoteHits > 0 && structural.textCoverageRatio >= 0.12) ? 0.92 : 0.0,
+      evidenceCount: quoteHits,
+      isModerate: quoteHits > 0,
+      isStrong:
+          quoteHits > 0 &&
+          structural.textCoverageRatio >= 0.12 &&
+          structural.lineCount >= 3,
+    );
+
+    final multiPanelStrong =
+        !structural.hasChatLikeLayout &&
+        !structural.hasTableLikeLayout &&
+        structural.blockCount >= 3 &&
+        structural.lineCount >= 6 &&
+        structural.textCoverageRatio >= 0.14;
+    final multiPanelModerate =
+        multiPanelStrong ||
+        (!structural.hasChatLikeLayout &&
+            !structural.hasTableLikeLayout &&
+            structural.blockCount >= 2 &&
+            structural.lineCount >= 4 &&
+            structural.textCoverageRatio >= 0.10);
+    final multiPanelMemeLike = PlacementSignal(
+      score: multiPanelStrong ? 0.9 : (multiPanelModerate ? 0.6 : 0.0),
+      evidenceCount: multiPanelModerate ? 1 : 0,
+      isModerate: multiPanelModerate,
+      isStrong: multiPanelStrong,
+    );
+
+    final fictionStrong =
+        cueSummary.animationCueCount > 0 &&
+        photoTextOverlayMemeLike.isModerate &&
+        (fictionHits > 0 || cueSummary.animationCueCount >= 2);
+    final fictionModerate =
+        fictionStrong ||
+        (cueSummary.animationCueCount > 0 &&
+            photoTextOverlayMemeLike.isModerate &&
+            structural.textCoverageRatio >= 0.12 &&
+            structural.lineCount >= 2);
+    final captionedFictionMemeLike = PlacementSignal(
+      score: fictionStrong ? 0.9 : (fictionModerate ? 0.55 : 0.0),
+      evidenceCount: fictionModerate ? 1 : 0,
+      isModerate: fictionModerate,
+      isStrong: fictionStrong,
+    );
+
+    final hasRealPhotoSubjectEvidence =
+        humanModerate ||
+        cueSummary.peopleCueCount > 0 ||
+        cueSummary.strongSportsCueCount > 0 ||
+        cueSummary.weakSportsCueCount > 0 ||
+        cueSummary.sportsContextCueCount > 0;
+    final hasLightCaptionOverlayLayout =
+        !structural.hasMrzPattern &&
+        !structural.hasChatLikeLayout &&
+        !structural.hasTableLikeLayout &&
+        structural.textCoverageRatio >= 0.06 &&
+        structural.textCoverageRatio < 0.14 &&
+        structural.lineCount >= 1 &&
+        structural.lineCount <= 2;
+    final hasCaptionMemeOcrStyle = structural.hasAnyToken(const [
+      'mf',
+      'bro',
+      'blud',
+      'thinks',
+      'me when',
+      'pov',
+      'when',
+      'nah',
+      "he's",
+      "she's",
+      'lebron',
+      'grandma',
+      'today',
+    ]);
+    final hasLowEntropyWatermarkOcr = structural.hasAnyToken(const [
+      'watermark',
+      '©',
+      'copyright',
+      'all rights reserved',
+    ]);
+    final captionOverlayPhotoMemeLike = PlacementSignal(
+      score:
+          (hasRealPhotoSubjectEvidence && hasLightCaptionOverlayLayout)
+              ? (hasCaptionMemeOcrStyle && !hasLowEntropyWatermarkOcr ? 0.95 : 0.7)
+              : 0.0,
+      evidenceCount:
+          (hasRealPhotoSubjectEvidence && hasLightCaptionOverlayLayout)
+              ? (hasCaptionMemeOcrStyle && !hasLowEntropyWatermarkOcr ? 2 : 1)
+              : 0,
+      isModerate:
+          hasRealPhotoSubjectEvidence &&
+          hasLightCaptionOverlayLayout &&
+          !hasLowEntropyWatermarkOcr,
+      isStrong:
+          hasRealPhotoSubjectEvidence &&
+          hasLightCaptionOverlayLayout &&
+          !hasLowEntropyWatermarkOcr &&
+          (hasCaptionMemeOcrStyle || structural.textCoverageRatio >= 0.10),
+    );
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-MEME] captionOverlayPhotoMemeLike='
+        '${captionOverlayPhotoMemeLike.isModerate} '
+        'textCoverage=${structural.textCoverageRatio.toStringAsFixed(3)} '
+        'lines=${structural.lineCount} '
+        'photoSubject=$hasRealPhotoSubjectEvidence '
+        'memeOcr=$hasCaptionMemeOcrStyle',
+      );
+    }
+
+    final hasProtectedDocumentIdentitySignal =
+        structural.hasMrzPattern ||
+        structural.hasQrCode ||
+        structural.barcodeCount > 0 ||
+        cueSummary.identityDocumentCueCount > 0 ||
+        cueSummary.documentCopyCueCount > 0 ||
+        cueSummary.receiptCueCount > 0;
+    final scenePlaceSignal = PlacementSignal(
+      score: placeScore,
+      evidenceCount:
+          cueSummary.placeCueCount +
+          cueSummary.strongPlaceCueCount +
+          (hasPlaceFilenameCue ? 1 : 0),
+      isModerate: placeModerate,
+      isStrong: placeStrong,
+    );
+
+    return AnalysisSignals(
+      humanCentered: humanPresenceSignal,
+      humanPresence: humanPresenceSignal,
+      petCentered: animalPresenceSignal,
+      animalPresence: animalPresenceSignal,
+      documentLike: documentnessSignal,
+      documentness: documentnessSignal,
+      screenshotLike: uiDensitySignal,
+      uiDensity: uiDensitySignal,
+      graphicPostLike: graphicMemeSignal,
+      graphicMemeNess: graphicMemeSignal,
+      tweetScreenshotMemeLike: tweetScreenshotMemeLike,
+      socialEmbedMemeLike: socialEmbedMemeLike,
+      photoTextOverlayMemeLike: photoTextOverlayMemeLike,
+      quoteCardMemeLike: quoteCardMemeLike,
+      captionOverlayPhotoMemeLike: captionOverlayPhotoMemeLike,
+      multiPanelMemeLike: multiPanelMemeLike,
+      captionedFictionMemeLike: captionedFictionMemeLike,
+      hasProtectedDocumentIdentitySignal: hasProtectedDocumentIdentitySignal,
+      placeLike: scenePlaceSignal,
+      scenePlaceStrength: scenePlaceSignal,
+      sportsGraphicLike: PlacementSignal(
+        score: sportsGraphicScore,
+        evidenceCount: cueSummary.sportsGraphicCueCount,
+        isModerate: sportsGraphicModerate,
+        isStrong: sportsGraphicStrong,
+      ),
+    );
+  }
+}
+
+class ContentTypeRoutingStage {
+  const ContentTypeRoutingStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  AssetMappingExplanation? route(AssetAnalysis analysis) {
+    if (kDebugMode) {
+      final top = analysis.topLabels
+          .map(
+            (l) => '${l.displayName.toLowerCase().trim()}:${l.confidence.toStringAsFixed(2)}',
+          )
+          .join(', ');
+      debugPrint('[HIVE-ROUTE-CHECK] topLabels=[$top]');
+      debugPrint(
+        '[HIVE-ROUTE-CHECK] nonPhotoArtwork=${_isNonPhotographicArtwork(analysis)} '
+        'overlayMeme=${_hasOverlayMemeEvidence(analysis)} '
+        'dominantVehicle=${_hasDominantVehiclePhotoEvidence(analysis)} '
+        'protectedDoc=${_hasProtectedDocumentIdentitySignalStrict(analysis)} '
+        'realHuman=${_hasRealHumanSubjectPriority(analysis)}',
+      );
+    }
+
+    final mediaRoute = _routeByMediaType(analysis);
+    if (mediaRoute != null) {
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${mediaRoute.cellId}');
+      }
+      return mediaRoute;
+    }
+
+    final receiptRoute = _routeByReceiptStyle(analysis);
+    if (receiptRoute != null) {
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${receiptRoute.cellId}');
+      }
+      return receiptRoute;
+    }
+
+    final prioritizedSurfaceRoute =
+        _tryRoutePrintedComicIllustratedOrDevicePhoto(analysis);
+    if (prioritizedSurfaceRoute != null) {
+      if (kDebugMode) {
+        debugPrint(
+          '[HIVE-ROUTE-CHECK] selectedRoute=${prioritizedSurfaceRoute.cellId}',
+        );
+      }
+      return prioritizedSurfaceRoute;
+    }
+
+    final artworkLabels = <String>{
+      'art',
+      'artwork',
+      'illustration',
+      'illustrations',
+      'drawing',
+      'sketch',
+      'line art',
+      'manga',
+      'anime',
+      'comic',
+      'cartoon',
+      'animated',
+      'animation',
+      'animated cartoon',
+      'fictional character',
+      'character design',
+      'clip art',
+      'digital art',
+      'graphic novel',
+      'comic book',
+      '2d art',
+      '2d animation',
+    };
+    final strongArtworkAllow =
+        analysis.scoringLabels.any((l) {
+          final n = l.displayName.toLowerCase().trim();
+          return (n == 'art' || n == 'illustration' || n == 'illustrations') &&
+              l.confidence >= 0.70;
+        }) ||
+        analysis.scoringLabels.any((l) {
+          final n = l.displayName.toLowerCase().trim();
+          return artworkLabels.contains(n) && l.confidence >= 0.65;
+        });
+
+    if (_hasOverlayMemeEvidence(analysis) &&
+        !_hasProtectedDocumentIdentitySignalStrict(analysis) &&
+        !_skipEarlyMemeRouteForFoodOrDevicePhoto(analysis)) {
+      final rule = KeywordPlacementDefinitions.ruleForCellId('memes')!;
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE] meme route -> memes');
+      }
+      final result = AssetMappingExplanation(
+        cellId: rule.cellId,
+        cellName: rule.cellName,
+        score: 1.5,
+        usedFallback: false,
+        topLabels: analysis.topLabels,
+        primaryEvidence: const ['meme route'],
+        secondarySupport: const ['meme route'],
+      );
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${result.cellId}');
+      }
+      return result;
+    }
+
+    if (strongArtworkAllow &&
+        !_hasOverlayMemeEvidence(analysis) &&
+        !_hasProtectedDocumentIdentitySignalStrict(analysis)) {
+      final rule = KeywordPlacementDefinitions.ruleForCellId('animation')!;
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE] artwork/animation route -> animation');
+      }
+      final result = AssetMappingExplanation(
+        cellId: rule.cellId,
+        cellName: rule.cellName,
+        score: 1.45,
+        usedFallback: false,
+        topLabels: analysis.topLabels,
+        primaryEvidence: const ['animation artwork route'],
+        secondarySupport: const ['animation artwork route'],
+      );
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${result.cellId}');
+      }
+      return result;
+    }
+
+    if (_hasDominantVehiclePhotoEvidence(analysis) &&
+        !_hasOverlayMemeEvidence(analysis) &&
+        !_hasProtectedDocumentIdentitySignalStrict(analysis) &&
+        !_hasRealHumanSubjectPriority(analysis)) {
+      final rule = KeywordPlacementDefinitions.ruleForCellId('vehicles')!;
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE] dominant vehicle route -> vehicles');
+      }
+      final result = AssetMappingExplanation(
+        cellId: rule.cellId,
+        cellName: rule.cellName,
+        score: 1.4,
+        usedFallback: false,
+        topLabels: analysis.topLabels,
+        primaryEvidence: const ['dominant vehicle route'],
+        secondarySupport: const ['dominant vehicle route'],
+      );
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${result.cellId}');
+      }
+      return result;
+    }
+
+    final chatRoute = _routeByChatScreenshotStyle(analysis);
+    if (chatRoute != null) {
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${chatRoute.cellId}');
+      }
+      return chatRoute;
+    }
+
+    final graphicRoute = _routeByGraphicPostStyle(analysis);
+    if (graphicRoute != null) {
+      if (kDebugMode) {
+        debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${graphicRoute.cellId}');
+      }
+      return graphicRoute;
+    }
+
+    final docRoute = _routeByDocumentStyle(analysis);
+    if (kDebugMode && docRoute != null) {
+      debugPrint('[HIVE-ROUTE-CHECK] selectedRoute=${docRoute.cellId}');
+    }
+    return docRoute;
+  }
+
+  AssetMappingExplanation? _routeByMediaType(AssetAnalysis analysis) {
+    if (analysis.asset.type == MediaAssetType.video) {
+      final videoRule = KeywordPlacementDefinitions.ruleForCellId('videos')!;
+      return AssetMappingExplanation(
+        cellId: videoRule.cellId,
+        cellName: videoRule.cellName,
+        score: 1.45,
+        usedFallback: false,
+        topLabels: analysis.topLabels,
+        primaryEvidence: [analysis.asset.type.name, 'video asset'],
+      );
+    }
+
+    if (analysis.asset.type == MediaAssetType.screenshot) {
+      final derived = DerivedSignals.from(analysis);
+      if (_hasPeopleFirstEvidence(analysis) &&
+          !_hasIdentityDocumentEvidence(analysis) &&
+          !_hasConfirmedMemePosterOverlay(analysis) &&
+          !_isPersonIncidentalInUi(analysis: analysis, derived: derived)) {
+        return null;
+      }
+
+      final hasStrongNatureBypass =
+          _hasStrongNatureEvidence(analysis) &&
+          !analysis.signals.humanCentered.isStrong &&
+          !_hasLandmarkPlaceAnchor(analysis) &&
+          analysis.cueSummary.travelContextCueCount < 2;
+      final hasStrongVehicleBypass =
+          _hasStrongVehicleEvidence(analysis) &&
+          !analysis.signals.humanCentered.isStrong &&
+          !_hasLandmarkPlaceAnchor(analysis);
+      if (_hasReceiptDocumentEvidence(analysis) ||
+          hasStrongNatureBypass ||
+          hasStrongVehicleBypass) {
+        return null;
+      }
+
+      // Dominant meme / poster overlays should compete on content signals, not
+      // screenshot media-type alone (meme screenshot captures).
+      if (_hasOverlayMemeEvidence(analysis) &&
+          !_hasProtectedDocumentIdentitySignalStrict(analysis) &&
+          !_skipEarlyMemeRouteForFoodOrDevicePhoto(analysis)) {
+        return null;
+      }
+
+      final screenshotRule = KeywordPlacementDefinitions.ruleForCellId(
+        'screenshots',
+      )!;
+      return AssetMappingExplanation(
+        cellId: screenshotRule.cellId,
+        cellName: screenshotRule.cellName,
+        score: 1.4,
+        usedFallback: false,
+        topLabels: analysis.topLabels,
+        primaryEvidence: [analysis.asset.type.name, 'native screenshot'],
+        secondarySupport: const ['media-type routing'],
+      );
+    }
+
+    return null;
+  }
+
+  AssetMappingExplanation? _routeByReceiptStyle(AssetAnalysis analysis) {
+    if (!_hasReceiptDocumentEvidence(analysis)) {
+      return null;
+    }
+    if (_hasPeopleFirstEvidence(analysis) &&
+        !_hasIdentityDocumentEvidence(analysis)) {
+      return null;
+    }
+    if (analysis.signals.placeLike.isStrong &&
+        _hasLandmarkPlaceAnchor(analysis)) {
+      return null;
+    }
+
+    final receiptRule = KeywordPlacementDefinitions.ruleForCellId('receipts')!;
+    final hasReceiptFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.receiptFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final receiptOcrTokenCount = _receiptOcrTokenCount(analysis);
+
+    return AssetMappingExplanation(
+      cellId: receiptRule.cellId,
+      cellName: receiptRule.cellName,
+      score: 1.33,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: [
+        if (hasReceiptFilenameCue) 'filename receipt',
+        if (receiptOcrTokenCount > 0) 'receipt OCR token',
+        'structural receipt layout',
+      ],
+      secondarySupport: const ['receipt style routing'],
+    );
+  }
+
+  AssetMappingExplanation? _routeByChatScreenshotStyle(AssetAnalysis analysis) {
+    final structural = analysis.structural;
+    final hasScreenshotMetadata =
+        analysis.asset.type == MediaAssetType.screenshot;
+
+    // StructuralSignals.isChatLike is treated as deterministic chat UI evidence.
+    final hasStructuralChatEvidence =
+        structural.isChatLike &&
+        (hasScreenshotMetadata || structural.textCoverageRatio >= 0.08) &&
+        !structural.hasMrzPattern;
+
+    if (!hasStructuralChatEvidence) {
+      return null;
+    }
+
+    final derived = DerivedSignals.from(analysis);
+    if (_hasPeopleFirstEvidence(analysis) &&
+        !_isPersonIncidentalInUi(analysis: analysis, derived: derived)) {
+      return null;
+    }
+
+    final screenshotRule = KeywordPlacementDefinitions.ruleForCellId(
+      'screenshots',
+    )!;
+    return AssetMappingExplanation(
+      cellId: screenshotRule.cellId,
+      cellName: screenshotRule.cellName,
+      score: 1.36,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: [
+        if (hasScreenshotMetadata) 'native screenshot',
+        'structural chat layout',
+      ],
+      secondarySupport: const ['chat screenshot routing'],
+    );
+  }
+
+  AssetMappingExplanation? _routeByDocumentStyle(AssetAnalysis analysis) {
+    if (_hasOverlayMemeEvidence(analysis) &&
+        !_hasProtectedDocumentIdentitySignalStrict(analysis)) {
+      return null;
+    }
+    if (_isFoodPackagingOrDessertLike(analysis)) {
+      return null;
+    }
+    if (_isPrintedMangaComicCoverLike(analysis)) {
+      return null;
+    }
+    if (_hasDominantVehiclePhotoEvidence(analysis)) {
+      return null;
+    }
+    final summary = analysis.cueSummary;
+    final derived = DerivedSignals.from(analysis);
+    final structural = analysis.structural;
+    final documentSignal = analysis.signals.documentLike;
+    final screenshotSignal = analysis.signals.screenshotLike;
+    final graphicSignal = analysis.signals.graphicPostLike;
+    final hasDocumentFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    if (_hasReceiptDocumentEvidence(analysis)) {
+      return null;
+    }
+
+    if (_hasPeopleFirstEvidence(analysis) &&
+        !structural.hasMrzPattern &&
+        summary.identityDocumentCueCount == 0) {
+      return null;
+    }
+
+    final hasStructuralChatEvidence =
+        structural.isChatLike &&
+        (analysis.asset.type == MediaAssetType.screenshot ||
+            structural.textCoverageRatio >= 0.08);
+    // StructuralSignals.hasMrzPattern is hard passport/ID evidence.
+    final hasStructuralPassportEvidence = structural.hasMrzPattern;
+    // StructuralSignals.isDocumentLike is the primary deterministic document gate.
+    final hasStructuralDocumentEvidence =
+        structural.isDocumentLike || derived.documentnessScore >= 0.70;
+    final hasUiLikeNonDocumentContext = _hasUiLikeNonDocumentContext(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasDecisiveDocumentEvidence = _hasDecisiveDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasMeaningfulDocumentEvidence = _hasMeaningfulDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+      hasDocumentFilenameCue: hasDocumentFilenameCue,
+    );
+
+    if (!hasStructuralPassportEvidence &&
+        !hasStructuralDocumentEvidence &&
+        !documentSignal.isStrong) {
+      return null;
+    }
+
+    if (!hasMeaningfulDocumentEvidence) {
+      return null;
+    }
+
+    if (hasStructuralChatEvidence && !hasStructuralPassportEvidence) {
+      return null;
+    }
+
+    if (graphicSignal.isStrong && !hasDecisiveDocumentEvidence) {
+      return null;
+    }
+
+    if (hasUiLikeNonDocumentContext && !hasDecisiveDocumentEvidence) {
+      return null;
+    }
+
+    if (screenshotSignal.isStrong &&
+        !hasDecisiveDocumentEvidence &&
+        summary.strictChatUiCueCount > 0 &&
+        summary.chatUiCueStrength >= summary.documentCueStrength) {
+      return null;
+    }
+
+    final documentRule = KeywordPlacementDefinitions.ruleForCellId(
+      'documents_receipts',
+    )!;
+    final primaryEvidence = <String>[
+      if (hasDocumentFilenameCue) 'filename document',
+      if (hasStructuralDocumentEvidence && !hasUiLikeNonDocumentContext)
+        'structural document gate',
+      if (hasStructuralPassportEvidence) 'mrz passport evidence',
+      if (summary.identityDocumentCueCount > 0) 'identity document',
+      if (summary.documentCopyCueCount > 0) 'document copy cue',
+    ];
+    final secondarySupport = <String>[
+      if (summary.documentCueCount > 0) 'document cue',
+      if (summary.peopleCueCount > 0) 'document over embedded face',
+      'document style routing',
+    ];
+
+    if (_deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+      return null;
+    }
+
+    return AssetMappingExplanation(
+      cellId: documentRule.cellId,
+      cellName: documentRule.cellName,
+      score: 1.34,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: primaryEvidence,
+      secondarySupport: secondarySupport,
+    );
+  }
+
+  AssetMappingExplanation? _routeByGraphicPostStyle(AssetAnalysis analysis) {
+    final summary = analysis.cueSummary;
+    final structural = analysis.structural;
+    final derived = DerivedSignals.from(analysis);
+    final hasAnimationFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.animationFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasScreenshotFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.screenshotFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+
+    if (_hasProtectedDocumentIdentitySignalStrict(analysis)) {
+      return null;
+    }
+
+    // Intrinsic manga/comic dialogue should stay in Animation unless there is
+    // explicit external overlay/edit evidence.
+    if (_isNonPhotographicArtwork(analysis) && !_hasOverlayMemeEvidence(analysis)) {
+      return null;
+    }
+
+    final hasCartoonFaceEvidence =
+        derived.graphicnessScore >= 0.65 &&
+        analysis.structural.faceCount >= 1 &&
+        analysis.cueSummary.peopleCueStrength < 0.35;
+
+    final hasQuoteCardEvidence =
+        analysis.structural.isPhotoQuoteCardMeme && derived.graphicnessScore >= 0.65;
+
+    // StructuralSignals.isMemeOrPosterLike is deterministic poster/text-overlay evidence.
+    final hasStrongGraphicPostEvidence =
+        (structural.isMemeOrPosterLike ||
+            derived.graphicnessScore >= 0.65 ||
+            hasCartoonFaceEvidence ||
+            hasQuoteCardEvidence) &&
+        !_hasPlainDocumentLayout(analysis);
+    final hasRepostedScreenshotLikeGraphicEvidence =
+        (hasScreenshotFilenameCue ||
+            summary.strictChatUiCueCount > 0 ||
+            summary.screenshotCueStrength >= 0.95) &&
+        (summary.animationCueCount > 0 || summary.logoTextApparelCueCount >= 2);
+    final hasPosterArtDocumentBridge = _hasPosterArtDocumentBridge(analysis);
+    // Structural OCR tokens drive scoreboard/fixture-card detection.
+    final hasSportsGraphicCardEvidence =
+        _hasSportsScoreboardEvidence(analysis) ||
+        analysis.signals.sportsGraphicLike.isStrong;
+
+    if (structural.hasMrzPattern) {
+      return null;
+    }
+
+    if (!_hasAnimationHardGateEvidence(analysis)) {
+      return null;
+    }
+
+    if (!hasStrongGraphicPostEvidence &&
+        !hasRepostedScreenshotLikeGraphicEvidence &&
+        !hasPosterArtDocumentBridge &&
+        !hasSportsGraphicCardEvidence) {
+      return null;
+    }
+
+    if (_hasPeopleFirstEvidence(analysis) &&
+        !_hasConfirmedMemePosterOverlay(analysis)) {
+      return null;
+    }
+
+    final memeRule = KeywordPlacementDefinitions.ruleForCellId('memes')!;
+    final primaryEvidence = <String>[
+      if (hasAnimationFilenameCue) 'filename stylized',
+      if (structural.isMemeOrPosterLike) 'structural meme poster',
+      if (hasPosterArtDocumentBridge) 'poster art document bridge',
+      if (hasSportsGraphicCardEvidence) 'sports graphic card',
+    ];
+    final secondarySupport = <String>[
+      if (hasStrongGraphicPostEvidence) 'graphic post priority',
+      if (hasPosterArtDocumentBridge) 'art plus printed page graphic',
+      if (summary.animationCueCount >= 2) 'strong stylized cluster',
+      if (summary.animationCueCount > 0 && summary.logoTextApparelCueCount > 0)
+        'post graphic cluster',
+      if (summary.logoTextApparelCueCount >= 2) 'graphic text overlay',
+      if (hasRepostedScreenshotLikeGraphicEvidence)
+        'reposted screenshot like graphic',
+      'graphic style routing',
+    ];
+
+    if (_mealPhotoShouldDeferGraphicMemeRoute(analysis)) {
+      return null;
+    }
+
+    if (_suppressLikelyNonPhotoFlatPanelForWeakBuiltEnvironment(analysis)) {
+      return null;
+    }
+
+    return AssetMappingExplanation(
+      cellId: memeRule.cellId,
+      cellName: memeRule.cellName,
+      score: 1.32,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: primaryEvidence,
+      secondarySupport: secondarySupport,
+    );
+  }
+
+  bool _hasSportsScoreboardEvidence(AssetAnalysis analysis) {
+    final structural = analysis.structural;
+    final hasScoreboardToken = structural.hasAnyToken(const [
+      'vs',
+      'fixture',
+      'score',
+      'kickoff',
+      'full time',
+      'half time',
+      'league',
+      'tournament',
+      'pts',
+    ]);
+    if (!hasScoreboardToken) {
+      return false;
+    }
+
+    final hasFlagToken = structural.hasAnyToken(const [
+      'flag',
+      'south africa',
+      'england',
+      'france',
+      'spain',
+      'germany',
+    ]);
+    final flagOrSportConfidence = _maxLabelConfidence(
+      analysis.scoringLabels,
+      const ['flag', 'sport'],
+    );
+
+    return hasFlagToken || flagOrSportConfidence >= 0.30;
+  }
+
+  double _maxLabelConfidence(
+    List<ClassificationLabel> labels,
+    List<String> keywords,
+  ) {
+    var maxConfidence = 0.0;
+
+    for (final label in labels) {
+      final normalized = label.displayName.toLowerCase();
+      final matches = keywords.any(normalized.contains);
+      if (matches && label.confidence > maxConfidence) {
+        maxConfidence = label.confidence;
+      }
+    }
+
+    return maxConfidence;
+  }
+}
+
+class WeightedCategoryScoringStage {
+  const WeightedCategoryScoringStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  List<PlacementScoreCard> score(AssetAnalysis analysis) {
+    return KeywordPlacementDefinitions.rules
+        .where((rule) => rule.cellId != 'videos')
+        .map((rule) => _scoreRule(rule: rule, analysis: analysis))
+        .toList(growable: false);
+  }
+
+  PlacementScoreCard _scoreRule({
+    required PlacementCellRule rule,
+    required AssetAnalysis analysis,
+  }) {
+    final basePriority = rule.priorityBias;
+    var score = basePriority;
+    final keywordMatchPolicy = _keywordMatchPolicyForCell(rule.cellId);
+    final primaryEvidence = <String>{};
+    final secondarySupport = <String>{};
+    final labelKeywordMatches = <String>[];
+    var weakFuzzyContribution = 0.0;
+    var assetTypeBoost = 0.0;
+
+    final appliesAssetTypeBoost =
+        rule.assetTypes.contains(analysis.asset.type);
+    final suppressScreenshotHandicap =
+        rule.cellId == 'screenshots' &&
+            analysis.asset.type == MediaAssetType.screenshot &&
+            _suppressScreenshotAssetTypeBoostForPortraitFirstSubject(analysis);
+
+    if (appliesAssetTypeBoost && !suppressScreenshotHandicap) {
+      assetTypeBoost = 0.88;
+      score += assetTypeBoost;
+      primaryEvidence.add(analysis.asset.type.name);
+    }
+
+    final filenameBoost = _scoreFilenameMatches(
+      rule: rule,
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      matchPolicy: keywordMatchPolicy,
+      primaryEvidence: primaryEvidence,
+    );
+    score += filenameBoost;
+
+    for (var index = 0; index < analysis.scoringLabels.length; index++) {
+      final label = analysis.scoringLabels[index];
+      final normalized = _matcher.normalize(label.displayName);
+      final tokens = _matcher.tokenize(normalized);
+      if (rule.cellId == 'devices_tech' &&
+          _devicesTechExcludedLabels.contains(normalized)) {
+        continue;
+      }
+      final rankWeight = 1 - (index * 0.12);
+      final effectiveWeight = rankWeight < 0.5 ? 0.5 : rankWeight;
+
+      for (final keyword in rule.keywords) {
+        final keywordMatch = _matcher.keywordMatch(
+          keyword: keyword,
+          tokens: tokens,
+          normalized: normalized,
+          matchPolicy: keywordMatchPolicy,
+        );
+        if (!keywordMatch.isPositive) {
+          continue;
+        }
+
+        var contribution =
+            label.confidence * effectiveWeight * keywordMatch.score;
+        if (keywordMatch.isWeakFuzzy) {
+          final remainingWeakContribution =
+              keywordMatchPolicy.weakMatchContributionCap -
+              weakFuzzyContribution;
+          if (remainingWeakContribution <= 0) {
+            continue;
+          }
+
+          contribution = math.min(contribution, remainingWeakContribution);
+          weakFuzzyContribution += contribution;
+          secondarySupport.add('weak ${rule.styleKey} keyword support');
+        }
+
+        if (contribution <= 0) {
+          continue;
+        }
+
+        score += contribution;
+        labelKeywordMatches.add(
+          '${label.displayName} -> $keyword '
+          '+${contribution.toStringAsFixed(3)} '
+          '(${keywordMatch.type.name})',
+        );
+        if (keywordMatch.isStrongEvidence ||
+            keywordMatchPolicy.allowWeakFuzzyPrimaryEvidence) {
+          primaryEvidence.add(keyword);
+        }
+      }
+    }
+
+    final ruleSpecificBoost = _applyRuleSpecificBoosts(
+      rule: rule,
+      analysis: analysis,
+      primaryEvidence: primaryEvidence,
+      secondarySupport: secondarySupport,
+    );
+    score += ruleSpecificBoost;
+
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-SCORE] category=${rule.cellId} '
+        'priorityBias=${basePriority.toStringAsFixed(3)} '
+        'assetTypeBoost=${assetTypeBoost.toStringAsFixed(3)} '
+        'filenameBoost=${filenameBoost.toStringAsFixed(3)} '
+        'labelMatches=$labelKeywordMatches '
+        'ruleSpecificBoost=${ruleSpecificBoost.toStringAsFixed(3)} '
+        'finalBeforePrecedence=${score.toStringAsFixed(3)} '
+        'primary=$primaryEvidence secondary=$secondarySupport',
+      );
+    }
+
+    return PlacementScoreCard(
+      rule: rule,
+      score: score,
+      primaryEvidence: primaryEvidence,
+      secondarySupport: secondarySupport,
+    );
+  }
+
+  double _scoreFilenameMatches({
+    required PlacementCellRule rule,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required KeywordMatchPolicy matchPolicy,
+    required Set<String> primaryEvidence,
+  }) {
+    if (normalizedFilename.isEmpty) {
+      return 0;
+    }
+
+    var score = 0.0;
+    var weakFuzzyContribution = 0.0;
+    for (final keyword in rule.keywords) {
+      final match = _matcher.keywordMatch(
+        keyword: keyword,
+        tokens: filenameTokens,
+        normalized: normalizedFilename,
+        matchPolicy: matchPolicy,
+      );
+      if (!match.isPositive) {
+        continue;
+      }
+
+      var contribution = 0.16 * match.score;
+      if (match.isWeakFuzzy) {
+        final remainingWeakContribution =
+            matchPolicy.weakMatchContributionCap - weakFuzzyContribution;
+        if (remainingWeakContribution <= 0) {
+          continue;
+        }
+
+        contribution = math.min(contribution, remainingWeakContribution);
+        weakFuzzyContribution += contribution;
+      }
+
+      if (contribution <= 0) {
+        continue;
+      }
+
+      score += contribution;
+      if (score >= 0.56) {
+        score = 0.56;
+        primaryEvidence.add('filename ${rule.styleKey}');
+        break;
+      }
+      if (match.isStrongEvidence || matchPolicy.allowWeakFuzzyPrimaryEvidence) {
+        primaryEvidence.add(keyword);
+      }
+    }
+
+    return score;
+  }
+
+  double _applyRuleSpecificBoosts({
+    required PlacementCellRule rule,
+    required AssetAnalysis analysis,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    return switch (rule.cellId) {
+      'people' => _peopleBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        secondarySupport: secondarySupport,
+      ),
+      'pets' => _petsBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        secondarySupport: secondarySupport,
+      ),
+      'travel' => _travelBoost(
+        cueSummary: analysis.cueSummary,
+        secondarySupport: secondarySupport,
+      ),
+      'places' => _placesBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        labels: analysis.scoringLabels,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'nature' => _natureBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'vehicles' => _vehiclesBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'food' => _foodBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        secondarySupport: secondarySupport,
+      ),
+      'documents_receipts' => _documentBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'receipts' => _receiptBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'screenshots' => _screenshotBoost(
+        asset: analysis.asset,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'devices_tech' => _devicesTechBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        structural: analysis.structural,
+        secondarySupport: secondarySupport,
+      ),
+      'sports' => _sportsBoost(
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        secondarySupport: secondarySupport,
+      ),
+      'animation' => _animationBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'memes' => _animationBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      'animation_cartoon_meme' => _animationBoost(
+        analysis: analysis,
+        cueSummary: analysis.cueSummary,
+        signals: analysis.signals,
+        normalizedFilename: analysis.normalizedFilename,
+        filenameTokens: analysis.filenameTokens,
+        primaryEvidence: primaryEvidence,
+        secondarySupport: secondarySupport,
+      ),
+      _ => 0,
+    };
+  }
+
+  double _peopleBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.peopleCueCount > 0) {
+      bonus += 0.18;
+      secondarySupport.add('people cue');
+    }
+
+    if (cueSummary.peopleCueCount > 0) {
+      bonus += 0.24;
+      secondarySupport.add('general people signal');
+    }
+
+    if (cueSummary.crowdCueCount > 0) {
+      bonus += 0.16;
+      secondarySupport.add('crowd or group');
+    }
+
+    if (cueSummary.portraitCueCount > 0) {
+      bonus += 0.14;
+      secondarySupport.add('portrait cue');
+    }
+
+    if (cueSummary.portraitCueCount > 0 && cueSummary.peopleCueCount > 0) {
+      bonus += 0.22;
+      secondarySupport.add('human subject cluster');
+    }
+
+    if (cueSummary.portraitCueCount >= 2) {
+      bonus += 0.18;
+      secondarySupport.add('selfie or portrait cluster');
+    }
+
+    if (cueSummary.peopleCueCount >= 2) {
+      bonus += 0.22;
+      secondarySupport.add('strong human cluster');
+    }
+
+    if (cueSummary.peopleCueStrength >= 0.96 ||
+        (cueSummary.portraitCueCount > 0 &&
+            cueSummary.peopleCueStrength >= 0.78)) {
+      bonus += 0.24;
+      secondarySupport.add('confident people cluster');
+    }
+
+    if (cueSummary.portraitCueCount > 0 &&
+        cueSummary.peopleCueStrength >= 0.68) {
+      bonus += 0.16;
+      secondarySupport.add('portrait led people evidence');
+    }
+
+    if (signals.humanPresence.isModerate) {
+      bonus += 0.14;
+      secondarySupport.add('human-centered signal');
+    }
+
+    if (signals.humanPresence.isStrong) {
+      bonus += 0.16;
+      secondarySupport.add('human-centered priority');
+    }
+
+    return bonus;
+  }
+
+  double _petsBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.directPetCueCount > 0) {
+      bonus += 0.16 + (cueSummary.directPetCueCount * 0.08);
+      secondarySupport.add('pet cue');
+    }
+
+    if (cueSummary.directPetCueStrength >= 1.05) {
+      bonus += 0.18;
+      secondarySupport.add('strong pet cluster');
+    }
+
+    if (cueSummary.portraitCueCount > 0 &&
+        cueSummary.directPetCueCount < 2 &&
+        cueSummary.peopleCueStrength >= cueSummary.directPetCueStrength) {
+      bonus -= 0.18;
+      secondarySupport.add('portrait evidence suppresses pets');
+    }
+
+    if (cueSummary.peopleCueCount > 0 &&
+        cueSummary.portraitCueCount > 0 &&
+        cueSummary.directPetCueCount < 2) {
+      bonus -= 0.16;
+      secondarySupport.add('human subject suppresses pets');
+    }
+
+    if (cueSummary.animationCueCount > 0 && cueSummary.directPetCueCount < 2) {
+      bonus -= 0.22;
+      secondarySupport.add('stylized graphic suppresses pets');
+    }
+
+    if (signals.humanPresence.isModerate &&
+        cueSummary.directPetCueCount < 2 &&
+        signals.humanPresence.score >= signals.animalPresence.score) {
+      bonus -= 0.18;
+      secondarySupport.add('human-centered signal suppresses pets');
+    }
+
+    if (signals.graphicMemeNess.isModerate &&
+        cueSummary.directPetCueCount < 2) {
+      bonus -= 0.12;
+      secondarySupport.add('graphic post signal suppresses pets');
+    }
+
+    return bonus;
+  }
+
+  double _travelBoost({
+    required CueSummary cueSummary,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.travelCueCount > 0) {
+      bonus += 0.12 + (cueSummary.travelCueCount * 0.06);
+      secondarySupport.add('travel cue');
+    }
+
+    if (cueSummary.travelContextCueCount > 0) {
+      bonus += 0.22 + (cueSummary.travelContextCueCount * 0.06);
+      secondarySupport.add('trip context');
+    }
+
+    if (cueSummary.travelContextCueStrength >= 0.9 ||
+        (cueSummary.travelContextCueCount > 0 &&
+            cueSummary.travelCueStrength >= 0.95)) {
+      bonus += 0.16;
+      secondarySupport.add('strong travel cluster');
+    }
+
+    if (cueSummary.travelContextCueCount > 0 && cueSummary.placeCueCount > 0) {
+      bonus += 0.12;
+      secondarySupport.add('travel destination overlap');
+    }
+
+    if (cueSummary.travelCueCount > 0 &&
+        cueSummary.travelContextCueCount == 0 &&
+        cueSummary.placeCueCount > 0) {
+      bonus -= 0.14;
+      secondarySupport.add('generic scenery prefers places');
+    }
+
+    return bonus;
+  }
+
+  double _placesBoost({
+    required AssetAnalysis analysis,
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required List<ClassificationLabel> labels,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+    var hasPlaceSignal = false;
+    final hasMeaningfulPlaceEvidence = _hasMeaningfulPlaceEvidence(
+      summary: cueSummary,
+      signals: signals,
+    );
+    final hasMosqueArchitecturePlaceEvidence =
+        _hasMosqueArchitecturePlaceEvidence(analysis);
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.placeFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.34;
+      primaryEvidence.add('filename place');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.placeCueCount > 0) {
+      bonus += 0.16 + (cueSummary.placeCueCount * 0.06);
+      secondarySupport.add('place cue');
+      hasPlaceSignal = true;
+    }
+
+    final naturalSceneCueCount = _naturalSceneCueCount(labels);
+    final naturalSceneCueStrength = _naturalSceneCueStrength(labels);
+    if (naturalSceneCueCount >= 2 &&
+        naturalSceneCueStrength >= 1.20 &&
+        !signals.uiDensity.isStrong &&
+        !signals.documentLike.isStrong &&
+        !signals.graphicPostLike.isStrong) {
+      bonus += 0.16 + math.min(0.12, naturalSceneCueStrength * 0.04);
+      secondarySupport.add('natural scene cluster');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.strongPlaceCueCount > 0) {
+      bonus += 0.18 + (cueSummary.strongPlaceCueCount * 0.06);
+      secondarySupport.add('place anchor cue');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.strongPlaceCueStrength >= 0.82 ||
+        cueSummary.placeCueStrength >= 1.12) {
+      bonus += 0.18;
+      secondarySupport.add('strong place cluster');
+      hasPlaceSignal = true;
+    }
+
+    if (cueSummary.travelCueCount > 0 &&
+        cueSummary.travelContextCueCount == 0 &&
+        hasMeaningfulPlaceEvidence &&
+        cueSummary.placeCueStrength >= cueSummary.travelCueStrength - 0.04) {
+      bonus += 0.12;
+      secondarySupport.add('place over generic travel');
+      hasPlaceSignal = true;
+    }
+
+    if (hasMosqueArchitecturePlaceEvidence) {
+      bonus += 0.18;
+      secondarySupport.add('mosque architecture cue');
+      hasPlaceSignal = true;
+    }
+
+    if (hasPlaceSignal &&
+        cueSummary.peopleCueCount == 0 &&
+        hasMeaningfulPlaceEvidence) {
+      bonus += 0.06;
+      secondarySupport.add('no dominant person');
+    }
+
+    if (signals.scenePlaceStrength.isModerate && hasMeaningfulPlaceEvidence) {
+      bonus += 0.08;
+      secondarySupport.add('scene place signal');
+    }
+
+    if (signals.scenePlaceStrength.isStrong) {
+      bonus += 0.14;
+      secondarySupport.add('place-style signal');
+    }
+
+    if (signals.uiDensity.isStrong &&
+        cueSummary.strongPlaceCueCount == 0 &&
+        cueSummary.placeCueCount < 2) {
+      bonus -= 0.18;
+      secondarySupport.add('ui-heavy frame suppresses places');
+    }
+
+    if (kDebugMode &&
+        (hasPlaceSignal ||
+            hasMosqueArchitecturePlaceEvidence ||
+            _mosqueArchitectureCueCount(analysis) > 0)) {
+      debugPrint(
+        '[HIVE-SCENE] placesBoost '
+        'placeCueCount=${cueSummary.placeCueCount} '
+        'strongPlaceCueCount=${cueSummary.strongPlaceCueCount} '
+        'mosqueArchitecture=$hasMosqueArchitecturePlaceEvidence '
+        'mosqueCueCount=${_mosqueArchitectureCueCount(analysis)} '
+        'bonus=${bonus.toStringAsFixed(3)}',
+      );
+    }
+
+    return bonus;
+  }
+
+  double _natureBoost({
+    required AssetAnalysis analysis,
+    required CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.natureFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.34;
+      primaryEvidence.add('filename nature');
+    }
+
+    if (cueSummary.natureCueCount > 0) {
+      bonus += 0.16 + (cueSummary.natureCueCount * 0.07);
+      secondarySupport.add('nature cue');
+    }
+
+    if (_hasStrongNatureEvidence(analysis)) {
+      bonus += 0.26;
+      secondarySupport.add('strong nature cluster');
+    }
+
+    return bonus;
+  }
+
+  double _vehiclesBoost({
+    required AssetAnalysis analysis,
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.vehicleFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.34;
+      primaryEvidence.add('filename vehicle');
+    }
+
+    if (cueSummary.vehicleCueCount > 0) {
+      bonus += 0.16 + (cueSummary.vehicleCueCount * 0.07);
+      secondarySupport.add('vehicle cue');
+    }
+
+    if (_hasPrimaryVehicleSubjectCue(analysis)) {
+      bonus += 0.18;
+      secondarySupport.add('primary vehicle subject');
+    }
+
+    if (_hasStrongVehicleEvidence(analysis)) {
+      bonus += 0.24;
+      secondarySupport.add('strong vehicle cluster');
+    }
+
+    if (signals.humanCentered.isStrong) {
+      bonus -= 0.16;
+      secondarySupport.add('human subject suppresses vehicles');
+    }
+
+    return bonus;
+  }
+
+  double _foodBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.foodCueCount > 0) {
+      bonus += 0.22 + (cueSummary.foodCueCount * 0.1);
+      secondarySupport.add('food cue');
+    }
+
+    if (cueSummary.strongFoodCueCount > 0) {
+      bonus += 0.14 + (cueSummary.strongFoodCueCount * 0.04);
+      secondarySupport.add('meal subject');
+    }
+
+    if (cueSummary.strongFoodCueStrength >= 0.8 ||
+        cueSummary.foodCueStrength >= 0.95) {
+      bonus += 0.24;
+      secondarySupport.add('strong food cluster');
+    }
+
+    final rescueBonusWillFire =
+        cueSummary.foodCueCount >=
+            KeywordPlacementDefinitions.kFoodMinimumThreshold &&
+        cueSummary.diningContextCueCount >= 1 &&
+        !signals.uiDensity.isStrong &&
+        !signals.documentLike.isStrong &&
+        !signals.graphicPostLike.isStrong &&
+        cueSummary.screenDeviceCueStrength < 0.3;
+
+    if (rescueBonusWillFire) {
+      if (kDebugMode) {
+        debugPrint(
+          '[HIVE-FOOD-RESCUE] '
+          'diningContextCueCount=${cueSummary.diningContextCueCount} '
+          'foodCueCount=${cueSummary.foodCueCount} '
+          'uiDensityStrong=${signals.uiDensity.isStrong} '
+          'documentStrong=${signals.documentLike.isStrong} '
+          'graphicStrong=${signals.graphicPostLike.isStrong} '
+          'screenDeviceStrength=${cueSummary.screenDeviceCueStrength} '
+          'rescueBonusWillFire=$rescueBonusWillFire',
+        );
+      }
+      bonus += 0.55;
+      secondarySupport.add('dining context rescue');
+      if (kDebugMode) {
+        debugPrint(
+          '[HIVE-FOOD-RESCUE] bonus applied: '
+          '$bonus matchedKeywords=$secondarySupport',
+        );
+      }
+    }
+
+    return bonus;
+  }
+
+  double _documentBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+    var hasDocumentSignal = false;
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.58;
+      primaryEvidence.add('filename document');
+      hasDocumentSignal = true;
+    }
+
+    if (cueSummary.documentCueCount > 0) {
+      bonus += 0.2 + (cueSummary.documentCueCount * 0.1);
+      secondarySupport.add('document cue');
+      hasDocumentSignal = true;
+    }
+
+    if (cueSummary.identityDocumentCueCount > 0) {
+      bonus += 0.42;
+      secondarySupport.add('identity document');
+      hasDocumentSignal = true;
+    }
+
+    if (cueSummary.documentCopyCueCount > 0) {
+      bonus += 0.16 + (cueSummary.documentCopyCueCount * 0.08);
+      secondarySupport.add('document copy cue');
+      hasDocumentSignal = true;
+    }
+
+    if (hasDocumentSignal && cueSummary.peopleCueCount > 0) {
+      bonus += 0.18;
+      secondarySupport.add('document over embedded face');
+    }
+
+    if (signals.documentness.isModerate) {
+      bonus += 0.14;
+      secondarySupport.add('document-like signal');
+    }
+
+    if (signals.documentness.isStrong) {
+      bonus += 0.18;
+      secondarySupport.add('document-first signal');
+    }
+
+    return bonus;
+  }
+
+  double _receiptBoost({
+    required AssetAnalysis analysis,
+    required CueSummary cueSummary,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+    final receiptOcrTokenCount = _receiptOcrTokenCount(analysis);
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.receiptFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.48;
+      primaryEvidence.add('filename receipt');
+    }
+
+    if (cueSummary.receiptCueCount > 0) {
+      bonus += 0.22 + (cueSummary.receiptCueCount * 0.1);
+      secondarySupport.add('receipt cue');
+    }
+
+    if (receiptOcrTokenCount > 0) {
+      bonus += 0.28 + (receiptOcrTokenCount * 0.07);
+      primaryEvidence.add('receipt OCR token');
+    }
+
+    if (receiptOcrTokenCount > 0 && _hasReceiptStructuralLayout(analysis)) {
+      bonus += 0.32;
+      secondarySupport.add('structural receipt layout');
+    }
+
+    if (_hasStrongReceiptEvidence(analysis)) {
+      bonus += 0.18;
+      secondarySupport.add('strong receipt evidence');
+    }
+
+    return bonus;
+  }
+
+  double _screenshotBoost({
+    required MediaAsset asset,
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+    var hasScreenshotSignal = false;
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.screenshotFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.72;
+      primaryEvidence.add('filename screenshot');
+      hasScreenshotSignal = true;
+    }
+
+    if (cueSummary.screenshotCueCount > 0) {
+      bonus += 0.18 + (cueSummary.screenshotCueCount * 0.08);
+      secondarySupport.add('ui signal');
+      hasScreenshotSignal = true;
+    }
+
+    if (cueSummary.strictChatUiCueCount > 0) {
+      bonus += 0.18 + (cueSummary.chatUiCueCount * 0.08);
+      secondarySupport.add('chat or messaging UI');
+      hasScreenshotSignal = true;
+    }
+
+    if (hasScreenshotSignal &&
+        asset.width > 0 &&
+        asset.height > 0 &&
+        (asset.width - asset.height).abs() > 180) {
+      bonus += 0.06;
+      secondarySupport.add('screen aspect');
+    }
+
+    if (hasScreenshotSignal && cueSummary.peopleCueCount > 0) {
+      bonus += 0.16;
+      secondarySupport.add('screen over portrait');
+    }
+
+    if (signals.uiDensity.isStrong) {
+      bonus += 0.12;
+      secondarySupport.add('screen-like signal');
+    }
+
+    return bonus;
+  }
+
+  double _sportsBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+
+    if (cueSummary.strongSportsCueCount > 0) {
+      bonus += 0.18 + (cueSummary.strongSportsCueCount * 0.08);
+      secondarySupport.add('sports cue');
+    }
+
+    if (cueSummary.strongSportsCueStrength >= 1.0) {
+      bonus += 0.22;
+      secondarySupport.add('strong sports cluster');
+    }
+
+    if (cueSummary.sportsContextCueCount > 0) {
+      bonus += 0.18;
+      secondarySupport.add('sports context');
+    }
+
+    if (cueSummary.sportsGraphicCueCount > 0) {
+      bonus += 0.18 + (cueSummary.sportsGraphicCueCount * 0.08);
+      secondarySupport.add('fixture or scoreboard cue');
+    }
+
+    if (cueSummary.sportsGraphicCueCount > 0 &&
+        cueSummary.logoTextApparelCueCount > 0) {
+      bonus += 0.18;
+      secondarySupport.add('sports post graphic');
+    }
+
+    if (cueSummary.strongSportsCueCount > 0 &&
+        cueSummary.sportsContextCueCount > 0) {
+      bonus += 0.18;
+      secondarySupport.add('live sports context');
+    }
+
+    if (cueSummary.weakSportsCueCount > 0 &&
+        cueSummary.strongSportsCueCount == 0) {
+      bonus += 0.02;
+      secondarySupport.add('weak sports cue');
+    }
+
+    if (signals.sportsGraphicLike.isStrong) {
+      bonus += 0.14;
+      secondarySupport.add('sports graphic signal');
+    }
+
+    return bonus;
+  }
+
+  double _devicesTechBoost({
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required StructuralSignals structural,
+    required Set<String> secondarySupport,
+  }) {
+    var bonus = 0.0;
+    final hasCuratedSupport =
+        cueSummary.screenDeviceCueCount > 0 ||
+        cueSummary.presentationCueCount > 0;
+
+    if (cueSummary.screenDeviceCueCount > 0) {
+      bonus += 0.16 + (cueSummary.screenDeviceCueCount * 0.06);
+      secondarySupport.add('screen device cue');
+    }
+
+    if (cueSummary.presentationCueCount > 0) {
+      bonus += 0.14 + (cueSummary.presentationCueCount * 0.05);
+      secondarySupport.add('presentation cue');
+    }
+
+    if (hasCuratedSupport &&
+        (signals.uiDensity.isStrong ||
+            structural.textCoverageRatio >= 0.12 ||
+            structural.hasTableLikeLayout)) {
+      bonus += 0.14;
+      secondarySupport.add('ui heavy screen context');
+    }
+
+    if (cueSummary.presentationCueCount > 0 &&
+        signals.graphicPostLike.isModerate &&
+        structural.textCoverageRatio >= 0.12) {
+      bonus += 0.12;
+      secondarySupport.add('presentation graphic context');
+    }
+
+    if (cueSummary.screenDeviceCueCount > 0 &&
+        cueSummary.presentationCueCount > 0) {
+      bonus += 0.12;
+      secondarySupport.add('screen presentation context');
+    }
+
+    return bonus;
+  }
+
+  double _animationBoost({
+    required AssetAnalysis analysis,
+    required CueSummary cueSummary,
+    required AnalysisSignals signals,
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> primaryEvidence,
+    required Set<String> secondarySupport,
+  }) {
+    if (!_hasAnimationHardGateEvidence(analysis)) {
+      return 0.0;
+    }
+
+    var bonus = 0.0;
+
+    if (_matcher.matchesFilenameCue(
+      normalizedFilename: normalizedFilename,
+      filenameTokens: filenameTokens,
+      cues: KeywordPlacementDefinitions.animationFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    )) {
+      bonus += 0.55;
+      primaryEvidence.add('filename stylized');
+    }
+
+    if (_hasPosterArtDocumentBridge(analysis)) {
+      bonus += 0.62;
+      primaryEvidence.add('poster art document bridge');
+      secondarySupport.add('art plus printed page graphic');
+    }
+
+    if (cueSummary.animationCueCount > 0) {
+      bonus += 0.24 + (cueSummary.animationCueCount * 0.09);
+      secondarySupport.add('stylized cue');
+    }
+
+    if (cueSummary.animationCueCount >= 2) {
+      bonus += 0.2;
+      secondarySupport.add('strong stylized cluster');
+    }
+
+    if (cueSummary.animationCueCount > 0 &&
+        cueSummary.logoTextApparelCueCount > 0) {
+      bonus += 0.22;
+      secondarySupport.add('post graphic cluster');
+    }
+
+    if (cueSummary.animationCueCount > 0 &&
+        cueSummary.logoTextApparelCueCount >= 2) {
+      bonus += 0.12;
+      secondarySupport.add('text overlay stylized');
+    }
+
+    if (signals.graphicPostLike.isModerate) {
+      bonus += 0.16;
+      secondarySupport.add('graphic post signal');
+    }
+
+    if (signals.graphicPostLike.isStrong) {
+      bonus += 0.18;
+      secondarySupport.add('graphic post priority');
+    }
+
+    return bonus;
+  }
+}
+
+class VetoPrecedenceStage {
+  const VetoPrecedenceStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  void apply({
+    required List<PlacementScoreCard> scores,
+    required AssetAnalysis analysis,
+  }) {
+    final derived = DerivedSignals.from(analysis);
+    _applyDeterministicPrecedenceRules(
+      scores: scores,
+      analysis: analysis,
+      derived: derived,
+    );
+    _applyAbsurdJumpSafeguards(
+      scores: scores,
+      analysis: analysis,
+      derived: derived,
+    );
+  }
+
+  void _applyDeterministicPrecedenceRules({
+    required List<PlacementScoreCard> scores,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final summary = analysis.cueSummary;
+    final signals = analysis.signals;
+    final nonPhotoArtwork = _isNonPhotographicArtwork(analysis);
+    final overlayMeme = _hasOverlayMemeEvidence(analysis);
+    final dominantVehicle = _hasDominantVehiclePhotoEvidence(analysis);
+    final protectedDoc = _hasProtectedDocumentIdentitySignalStrict(analysis);
+    final realHuman = _hasRealHumanSubjectPriority(analysis);
+    final hasAnyMemeSignal = signals.hasConfirmedMemeSubtype;
+
+    final standaloneIllustratedRouting =
+        _isArtworkOrAnimationLike(analysis, derived) &&
+            !_shouldPreferMemesOverIllustrationRouting(analysis) &&
+            (!_hasPeopleFirstEvidence(analysis) || nonPhotoArtwork);
+    final illustratedPriority =
+        _isPrintedMangaComicCoverLike(analysis) || standaloneIllustratedRouting;
+
+    if (illustratedPriority && !protectedDoc) {
+      _vetoRule(scores, 'people', 'illustrated stack suppresses people');
+      _boostRule(
+        scores,
+        'animation',
+        0.78,
+        'illustrated subject boosts animation',
+      );
+      _vetoRule(scores, 'nature', 'illustrated stack suppresses nature');
+      _vetoRule(scores, 'places', 'illustrated stack suppresses scenic cells');
+      if (summary.receiptCueCount == 0 &&
+          summary.identityDocumentCueCount == 0 &&
+          !analysis.structural.hasMrzPattern) {
+        _vetoRule(
+          scores,
+          'documents_receipts',
+          'illustrated stack suppresses paperwork cells',
+        );
+      }
+    }
+
+    if (_isPhoneScreenPhotoLike(analysis, derived) && !protectedDoc) {
+      _boostRule(
+        scores,
+        'devices_tech',
+        0.32,
+        'screen photo boosts devices',
+      );
+      _vetoRule(scores, 'people', 'device screen subject suppresses people');
+    }
+
+    // Animated/cartoon/non-real content must never land in People.
+    if (nonPhotoArtwork && !protectedDoc) {
+      _vetoRule(scores, 'people', 'non-photographic artwork suppresses people');
+      if (overlayMeme) {
+        _boostRule(scores, 'memes', 0.74, 'artwork meme beats people');
+      } else {
+        _boostRule(scores, 'animation', 0.74, 'artwork routes to animation');
+      }
+      return;
+    }
+
+    if (dominantVehicle && !protectedDoc && !overlayMeme && !realHuman) {
+      _boostRule(scores, 'vehicles', 0.74, 'dominant vehicle beats nature/places');
+      _vetoRule(scores, 'nature', 'dominant vehicle suppresses nature');
+      _vetoRule(scores, 'places', 'dominant vehicle suppresses places');
+    }
+
+    if (_deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+      _boostRule(scores, 'food', 0.14, 'packaged food OCR subject priority');
+    }
+
+    if (hasAnyMemeSignal &&
+        !_deferDocumentOrGraphicRouteForFoodPackaging(analysis) &&
+        !_skipMemePrecedenceForDevicePhoto(analysis)) {
+      _boostRule(
+        scores,
+        'memes',
+        0.72,
+        'deterministic meme subtype beats people',
+      );
+      _vetoRule(scores, 'people', 'deterministic meme subtype suppresses people');
+      _vetoRule(scores, 'sports', 'deterministic meme subtype suppresses sports');
+      _vetoRule(
+        scores,
+        'screenshots',
+        'deterministic meme subtype suppresses screenshots',
+      );
+      if (!analysis.structural.hasMrzPattern &&
+          summary.identityDocumentCueCount == 0 &&
+          summary.documentCopyCueCount == 0) {
+        _vetoRule(
+          scores,
+          'documents_receipts',
+          'deterministic meme subtype suppresses documents',
+        );
+      }
+      return;
+    }
+
+    if (signals.captionOverlayPhotoMemeLike.isModerate &&
+        !signals.hasProtectedDocumentIdentitySignal &&
+        !_deferDocumentOrGraphicRouteForFoodPackaging(analysis) &&
+        !_skipMemePrecedenceForDevicePhoto(analysis)) {
+      _boostRule(
+        scores,
+        'memes',
+        0.72,
+        'caption overlay meme beats people and sports',
+      );
+      _vetoRule(scores, 'people', 'caption overlay meme suppresses people');
+      _vetoRule(scores, 'sports', 'caption overlay meme suppresses sports');
+      _vetoRule(
+        scores,
+        'screenshots',
+        'caption overlay meme suppresses screenshots',
+      );
+      if (!analysis.structural.hasMrzPattern &&
+          summary.identityDocumentCueCount == 0 &&
+          summary.documentCopyCueCount == 0) {
+        _vetoRule(
+          scores,
+          'documents_receipts',
+          'caption overlay meme suppresses documents',
+        );
+      }
+      return;
+    }
+
+    if (_isNonPhotographicArtwork(analysis) &&
+        !_hasOverlayMemeEvidence(analysis) &&
+        !signals.hasProtectedDocumentIdentitySignal) {
+      _vetoRule(scores, 'people', 'non-photographic artwork suppresses people');
+    }
+
+    final hasQuoteCardMemeEvidence =
+        analysis.structural.isPhotoQuoteCardMeme && derived.graphicnessScore >= 0.65;
+
+    final graphicnessMemeLikeness =
+        derived.graphicnessScore >= 0.65 && !_hasPeopleFirstEvidence(analysis);
+    final hasActiveMemeSignal =
+        signals.graphicMemeNess.isStrong ||
+        analysis.structural.isMemeOrPosterLike ||
+        graphicnessMemeLikeness ||
+        hasQuoteCardMemeEvidence;
+    final hasDocumentFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasPosterArtDocumentBridge = _hasPosterArtDocumentBridge(analysis);
+    final hasAnimationHardGateEvidence = _hasAnimationHardGateEvidence(
+      analysis,
+    );
+    final hasGraphicPostEvidence =
+        hasAnimationHardGateEvidence &&
+        (signals.graphicPostLike.isStrong ||
+            hasPosterArtDocumentBridge ||
+            analysis.structural.isMemeOrPosterLike);
+    final hasGraphicDocumentConflict =
+        hasGraphicPostEvidence &&
+        summary.identityDocumentCueCount == 0 &&
+        summary.documentCopyCueCount == 0;
+    final hasStrongScreenshotEvidence = signals.screenshotLike.isStrong;
+    final hasUiLikeNonDocumentContext = _hasUiLikeNonDocumentContext(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasDecisiveDocumentEvidence = _hasDecisiveDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasMeaningfulDocumentEvidence = _hasMeaningfulDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+      hasDocumentFilenameCue: hasDocumentFilenameCue,
+    );
+    final hasStrongDocumentEvidence =
+        signals.documentLike.isStrong &&
+        hasMeaningfulDocumentEvidence &&
+        !hasGraphicDocumentConflict;
+    final hasStrongPlaceEvidence = signals.placeLike.isStrong;
+    final hasStrongFoodEvidence =
+        summary.strongFoodCueCount > 0 &&
+            summary.strongFoodCueStrength >= 0.8 ||
+        summary.foodCueCount >= 2 ||
+        summary.foodCueStrength >= 0.95;
+    final hasStrongTravelContext =
+        summary.travelContextCueCount > 0 &&
+        (summary.travelContextCueStrength >= 0.9 ||
+            summary.travelCueCount >= 2 ||
+            summary.placeCueCount > 0);
+    final hasLandmarkPlaceAnchor = _hasLandmarkPlaceAnchor(analysis);
+    final hasStrongNatureEvidence = _hasStrongNatureEvidence(analysis);
+    final hasStrongVehicleEvidence = _hasStrongVehicleEvidence(analysis);
+    final receiptOcrTokenCount = _receiptOcrTokenCount(analysis);
+    final hasReceiptDocumentEvidence = _hasReceiptDocumentEvidence(analysis);
+    final hasHumanPhotoEvidence = signals.humanCentered.isStrong;
+    final hasModerateHumanPhotoEvidence = signals.humanCentered.isModerate;
+    final hasPeopleFirstEvidence = _hasPeopleFirstEvidence(analysis);
+    final strongestPeopleLikeLabel = _strongestPeopleLikeLabelConfidence(analysis);
+    final suppressPeopleFirstBoosts = _suppressPeopleFirstBoosts(analysis, derived);
+    final hasStylizedHint = _hasStylizedNonPhotoHint(analysis);
+    final hasConfirmedMemePosterOverlay = _hasConfirmedMemePosterOverlay(
+      analysis,
+    );
+    final hasIdentityDocumentEvidence = _hasIdentityDocumentEvidence(analysis);
+    final hasPersonIncidentalInUi = _isPersonIncidentalInUi(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasSportsGraphicEvidence = signals.sportsGraphicLike.isStrong;
+    final hasScreenPresentationAntiDriftEvidence =
+        _hasScreenPresentationAntiDriftEvidence(
+          analysis: analysis,
+          derived: derived,
+        );
+    final hasStrongScreenPresentationEvidence =
+        _hasStrongScreenPresentationSupport(
+          analysis: analysis,
+          derived: derived,
+        );
+    final hasIncidentalPeopleAtPlace =
+        hasStrongPlaceEvidence &&
+        (summary.placeCueStrength >=
+            summary.peopleCueStrength -
+                KeywordPlacementDefinitions
+                    .kIncidentalPeoplePlaceStrengthMargin) &&
+        (summary.strongPlaceCueCount > 0 || summary.placeCueCount >= 2) &&
+        summary.peopleCueCount > 0 &&
+        summary.crowdCueCount > 0 &&
+        summary.portraitCueCount == 0 &&
+        !signals.humanPresence.isStrong &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence &&
+        !signals.graphicPostLike.isStrong &&
+        !hasSportsGraphicEvidence;
+
+    if (suppressPeopleFirstBoosts && kDebugMode) {
+      debugPrint(
+        '[HIVE-PEOPLE-GUARD] weakPeopleLabelsOnly=true '
+        'strongestPeopleLikeLabel=${strongestPeopleLikeLabel.toStringAsFixed(2)} '
+        'faceCount=${analysis.structural.faceCount} '
+        'largestFaceAreaRatio=${analysis.structural.largestFaceAreaRatio.toStringAsFixed(3)}',
+      );
+    }
+
+    if (suppressPeopleFirstBoosts &&
+        (hasStylizedHint ||
+            _isNonPhotographicArtwork(analysis) ||
+            signals.graphicPostLike.isModerate ||
+            derived.graphicnessScore >= 0.55 ||
+            analysis.structural.isMemeOrPosterLike ||
+            _weakCartoonHumanFaceCase(analysis, derived))) {
+      _vetoRule(scores, 'people', 'weak people labels without real face evidence');
+      if (!_shouldPreferMemesOverIllustrationRouting(analysis) &&
+          !_deferDocumentOrGraphicRouteForFoodPackaging(analysis)) {
+        _boostRule(
+          scores,
+          'animation',
+          0.62,
+          'stylized/animated weak people fallback',
+        );
+      }
+    }
+
+    if (summary.screenDeviceCueCount >= 1 &&
+        derived.humanPresenceScore > 0.35 &&
+        analysis.structural.largestFaceAreaRatio < 0.08 &&
+        !_hasDominantVehiclePhotoEvidence(analysis)) {
+      _boostRule(scores, 'devices_tech', 0.22, 'photo of device screen subject');
+      _penalizeRule(scores, 'people', 0.18, 'device photo suppresses on-screen face as people subject');
+    }
+
+    if (_hasVehicleSubjectLabelConfidence55(analysis) &&
+        summary.screenDeviceCueCount == 0 &&
+        !_hasDominantVehiclePhotoEvidence(analysis)) {
+      _boostRule(scores, 'vehicles', 0.28, 'vehicle subject priority');
+      _penalizeRule(scores, 'places', 0.22, 'vehicle suppresses background scene');
+    }
+
+    if (signals.humanCentered.isStrong && !suppressPeopleFirstBoosts) {
+      _vetoRule(scores, 'nature', 'people-first suppresses nature');
+      _vetoRule(scores, 'vehicles', 'people-first suppresses vehicles');
+    }
+
+    if (signals.placeLike.isStrong && hasLandmarkPlaceAnchor) {
+      _boostRule(scores, 'places', 0.22, 'landmark anchor priority');
+      _vetoRule(scores, 'nature', 'landmark anchor suppresses nature');
+      if (summary.strongPlaceCueCount >= 1) {
+        _vetoRule(scores, 'vehicles', 'landmark anchor suppresses vehicles');
+      }
+    }
+
+    if (summary.travelContextCueCount >= 2) {
+      _boostRule(scores, 'travel', 0.22, 'travel context suppresses nature');
+      _vetoRule(scores, 'nature', 'travel context suppresses nature');
+    }
+
+    if (hasStrongNatureEvidence &&
+        !signals.humanCentered.isStrong &&
+        !hasLandmarkPlaceAnchor &&
+        summary.travelContextCueCount < 2 &&
+        !hasStrongFoodEvidence &&
+        !signals.petCentered.isStrong &&
+        !_hasDominantVehiclePhotoEvidence(analysis)) {
+      _boostRule(scores, 'nature', 0.74, 'strong nature evidence');
+    }
+
+    if (hasStrongVehicleEvidence &&
+        !signals.humanCentered.isStrong &&
+        !hasLandmarkPlaceAnchor) {
+      _boostRule(scores, 'vehicles', 0.68, 'strong vehicle evidence');
+    }
+
+    if (analysis.structural.hasMrzPattern) {
+      _boostRule(
+        scores,
+        'documents_receipts',
+        0.28,
+        'MRZ evidence suppresses receipts',
+      );
+      _vetoRule(scores, 'receipts', 'MRZ evidence suppresses receipts');
+    }
+
+    if (summary.identityDocumentCueCount >= 1) {
+      _boostRule(
+        scores,
+        'documents_receipts',
+        0.24,
+        'identity document suppresses receipts',
+      );
+      _vetoRule(scores, 'receipts', 'identity document suppresses receipts');
+    }
+
+    if (summary.documentCopyCueCount >= 2 && receiptOcrTokenCount == 0) {
+      _boostRule(
+        scores,
+        'documents_receipts',
+        0.2,
+        'document copy suppresses receipts',
+      );
+      _vetoRule(
+        scores,
+        'receipts',
+        'document copy without receipt OCR suppresses receipts',
+      );
+    }
+
+    if (hasReceiptDocumentEvidence && receiptOcrTokenCount > 0) {
+      _boostRule(scores, 'receipts', 0.52, 'receipt OCR document layout');
+      _penalizeRule(
+        scores,
+        'screenshots',
+        0.36,
+        'receipt OCR beats screenshot',
+      );
+    }
+
+    if (hasStrongScreenshotEvidence) {
+      _boostRule(scores, 'screenshots', 0.3, 'deterministic screenshot rule');
+      if (summary.screenshotCueStrength >= summary.peopleCueStrength) {
+        _boostRule(scores, 'screenshots', 0.26, 'screen signal dominates');
+      }
+      if (summary.strictChatUiCueCount > 0) {
+        _boostRule(scores, 'screenshots', 0.22, 'chat screenshot priority');
+      }
+      _penalizeRule(scores, 'people', 0.48, 'screen signal suppresses people');
+      if (summary.chatUiCueCount > 0 && summary.portraitCueCount <= 1) {
+        _penalizeRule(
+          scores,
+          'people',
+          0.2,
+          'incidental face suppressed by UI screenshot',
+        );
+      }
+    }
+
+    if (hasStrongDocumentEvidence) {
+      _boostRule(
+        scores,
+        'documents_receipts',
+        0.34,
+        'deterministic document rule',
+      );
+      if (summary.documentCueStrength >= summary.peopleCueStrength) {
+        _boostRule(
+          scores,
+          'documents_receipts',
+          0.22,
+          'document signal dominates',
+        );
+      }
+      if (summary.identityDocumentCueCount > 0 ||
+          summary.documentCopyCueCount >= 2) {
+        _boostRule(
+          scores,
+          'documents_receipts',
+          0.24,
+          'document copy priority',
+        );
+      }
+      _penalizeRule(
+        scores,
+        'people',
+        0.62,
+        summary.identityDocumentCueCount > 0
+            ? 'identity document suppresses people'
+            : 'document signal suppresses people',
+      );
+      _boostRule(
+        scores,
+        'documents_receipts',
+        0.12,
+        'document over embedded face',
+      );
+      if (summary.portraitCueCount <= 1) {
+        _penalizeRule(
+          scores,
+          'people',
+          0.18,
+          'incidental face suppressed by document copy',
+        );
+      }
+      if (hasUiLikeNonDocumentContext && !hasDecisiveDocumentEvidence) {
+        _penalizeRule(
+          scores,
+          'documents_receipts',
+          0.32,
+          'ui-like page suppresses weak document text',
+        );
+      }
+    }
+
+    if (hasStrongScreenshotEvidence && hasStrongDocumentEvidence) {
+      if (summary.identityDocumentCueCount > 0 ||
+          summary.documentCopyCueCount >= 2) {
+        _boostRule(
+          scores,
+          'documents_receipts',
+          0.18,
+          'document copy beats screenshot',
+        );
+        _penalizeRule(
+          scores,
+          'screenshots',
+          0.16,
+          'document evidence beats screenshot',
+        );
+      } else if (summary.strictChatUiCueCount > 0 &&
+          summary.chatUiCueStrength >= summary.documentCueStrength) {
+        _boostRule(
+          scores,
+          'screenshots',
+          0.18,
+          'chat UI beats document-like text',
+        );
+        _penalizeRule(
+          scores,
+          'documents_receipts',
+          0.14,
+          'chat screenshot suppresses document',
+        );
+      }
+    }
+
+    final hasConfirmedMemeSubtype = analysis.signals.hasConfirmedMemeSubtype;
+    if (!hasConfirmedMemeSubtype) {
+      if (hasPeopleFirstEvidence && !hasActiveMemeSignal && !suppressPeopleFirstBoosts) {
+        if (hasConfirmedMemePosterOverlay) {
+          _boostRule(
+            scores,
+            'animation_cartoon_meme',
+            0.34,
+            'confirmed meme overlay beats embedded person',
+          );
+          _penalizeRule(
+            scores,
+            'documents_receipts',
+            0.28,
+            'meme overlay suppresses document fallback',
+          );
+          _penalizeRule(
+            scores,
+            'screenshots',
+            0.24,
+            'meme overlay suppresses screenshot fallback',
+          );
+        } else if (hasIdentityDocumentEvidence) {
+          _boostRule(
+            scores,
+            'documents_receipts',
+            0.36,
+            'identity document beats embedded person',
+          );
+          _penalizeRule(
+            scores,
+            'screenshots',
+            0.22,
+            'identity document suppresses screenshot fallback',
+          );
+          _penalizeRule(
+            scores,
+            'animation_cartoon_meme',
+            0.34,
+            'identity document suppresses meme fallback',
+          );
+        } else if (hasPersonIncidentalInUi) {
+          _boostRule(
+            scores,
+            'screenshots',
+            0.28,
+            'incidental person embedded in UI',
+          );
+          _penalizeRule(
+            scores,
+            'documents_receipts',
+            0.24,
+            'UI screenshot suppresses document fallback',
+          );
+          _penalizeRule(
+            scores,
+            'animation_cartoon_meme',
+            0.32,
+            'UI screenshot suppresses meme fallback',
+          );
+        } else {
+          _boostRule(scores, 'people', 0.56, 'people-first subject priority');
+          _penalizeRule(
+            scores,
+            'screenshots',
+            0.64,
+            'people-first suppresses screenshot fallback',
+          );
+          _penalizeRule(
+            scores,
+            'documents_receipts',
+            0.64,
+            'people-first suppresses document fallback',
+          );
+          _penalizeRule(
+            scores,
+            'animation_cartoon_meme',
+            0.72,
+            'people-first suppresses meme fallback',
+          );
+        }
+      }
+    }
+
+    if (hasHumanPhotoEvidence &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence &&
+        !_isNonPhotographicArtwork(analysis) &&
+        !suppressPeopleFirstBoosts) {
+      _boostRule(scores, 'people', 0.24, 'human photo floor');
+    }
+
+    if (hasModerateHumanPhotoEvidence &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence &&
+        !hasActiveMemeSignal &&
+        !_isNonPhotographicArtwork(analysis) &&
+        !suppressPeopleFirstBoosts) {
+      _boostRule(scores, 'people', 0.22, 'human subject priority');
+      if (summary.directPetCueCount <= 1) {
+        _penalizeRule(scores, 'pets', 0.26, 'human subject suppresses pets');
+      }
+    }
+
+    if (summary.portraitCueCount >= 2 &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence &&
+        !suppressPeopleFirstBoosts) {
+      _boostRule(scores, 'people', 0.18, 'portrait priority');
+      _penalizeRule(scores, 'pets', 0.2, 'portrait suppresses weak pet');
+    }
+
+    if (hasIncidentalPeopleAtPlace) {
+      _boostRule(
+        scores,
+        'places',
+        0.34,
+        'place subject outranks incidental crowd',
+      );
+      _penalizeRule(
+        scores,
+        'people',
+        0.28,
+        'incidental crowd suppressed by place subject',
+      );
+    }
+
+    if (hasStrongPlaceEvidence &&
+        summary.directPetCueStrength < summary.placeCueStrength) {
+      _boostRule(scores, 'places', 0.28, 'scenery floor');
+      if (summary.strongPlaceCueCount > 0) {
+        _boostRule(scores, 'places', 0.16, 'architecture or venue anchor');
+      }
+      if (summary.placeCueStrength >= summary.directPetCueStrength + 0.16) {
+        _boostRule(scores, 'places', 0.16, 'place signal dominates');
+        _penalizeRule(scores, 'pets', 0.34, 'place signal suppresses pets');
+      }
+    }
+
+    if (hasStrongPlaceEvidence &&
+        !hasStrongTravelContext &&
+        summary.placeCueStrength >= summary.travelCueStrength - 0.04) {
+      _boostRule(scores, 'places', 0.24, 'places over generic travel');
+      if (summary.travelCueCount > 0) {
+        _penalizeRule(scores, 'travel', 0.26, 'generic scenery stays places');
+      }
+    }
+
+    if (hasStrongScreenPresentationEvidence &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence) {
+      _boostRule(scores, 'devices_tech', 0.22, 'screen presentation support');
+    }
+
+    if (hasScreenPresentationAntiDriftEvidence) {
+      if (summary.presentationCueCount >= 2 &&
+          !hasStrongScreenshotEvidence &&
+          !hasStrongDocumentEvidence) {
+        _boostRule(
+          scores,
+          'devices_tech',
+          0.18,
+          'presentation reference support',
+        );
+      }
+
+      if (!hasStrongPlaceEvidence || summary.strongPlaceCueCount == 0) {
+        _penalizeRule(
+          scores,
+          'places',
+          0.2,
+          'screen presentation suppresses places',
+        );
+      }
+
+      if (summary.directPetCueCount <= 1) {
+        _penalizeRule(
+          scores,
+          'pets',
+          0.22,
+          'screen presentation suppresses pets',
+        );
+      }
+
+      if (!hasDecisiveDocumentEvidence &&
+          summary.chatUiCueStrength +
+                  summary.screenDeviceCueStrength +
+                  summary.presentationCueStrength >=
+              summary.documentCueStrength) {
+        final documentSuppression = summary.presentationCueCount >= 2
+            ? 0.36
+            : 0.18;
+        _penalizeRule(
+          scores,
+          'documents_receipts',
+          documentSuppression,
+          'screen presentation suppresses documents',
+        );
+      }
+    }
+
+    if (hasStrongFoodEvidence &&
+        summary.documentCueStrength < summary.foodCueStrength + 0.18) {
+      _boostRule(scores, 'food', 0.24, 'food floor');
+      if (summary.strongFoodCueCount > 0) {
+        _boostRule(scores, 'food', 0.14, 'food subject priority');
+      }
+    }
+
+    if (hasGraphicPostEvidence &&
+        !_deferDocumentOrGraphicRouteForFoodPackaging(analysis) &&
+        !hasStrongScreenshotEvidence &&
+        !hasStrongDocumentEvidence) {
+      _boostRule(
+        scores,
+        'animation_cartoon_meme',
+        0.28,
+        'graphic post priority',
+      );
+      if (summary.logoTextApparelCueCount >= 2) {
+        _boostRule(
+          scores,
+          'animation_cartoon_meme',
+          0.16,
+          'text overlay graphic',
+        );
+      }
+      if (summary.directPetCueCount <= 1) {
+        _penalizeRule(scores, 'pets', 0.24, 'stylized graphic suppresses pets');
+      }
+      if (summary.identityDocumentCueCount == 0 &&
+          summary.documentCopyCueCount == 0) {
+        _penalizeRule(
+          scores,
+          'documents_receipts',
+          0.28,
+          'graphic post suppresses documents',
+        );
+      }
+      if (hasPosterArtDocumentBridge) {
+        _boostRule(
+          scores,
+          'animation_cartoon_meme',
+          0.42,
+          'poster art document bridge',
+        );
+        _penalizeRule(
+          scores,
+          'documents_receipts',
+          0.64,
+          'poster art suppresses weak document fallback',
+        );
+      }
+      if (summary.placeCueCount > 0 || summary.strongPlaceCueCount > 0) {
+        _penalizeRule(scores, 'places', 0.22, 'graphic post suppresses places');
+      }
+    }
+
+    if (hasSportsGraphicEvidence) {
+      _boostRule(scores, 'sports', 0.3, 'sports fixture graphic priority');
+      if (summary.placeCueCount > 0 || summary.strongPlaceCueCount > 0) {
+        _penalizeRule(
+          scores,
+          'places',
+          0.34,
+          'sports graphic suppresses places',
+        );
+      }
+      if (summary.animationCueCount > 0) {
+        _boostRule(scores, 'sports', 0.12, 'sports poster priority');
+      }
+    }
+  }
+
+  void _applyAbsurdJumpSafeguards({
+    required List<PlacementScoreCard> scores,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final summary = analysis.cueSummary;
+    final signals = analysis.signals;
+    final hasDocumentFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasScreenshotFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.screenshotFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasPlaceFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.placeFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasScreenPresentationAntiDriftEvidence =
+        _hasScreenPresentationAntiDriftEvidence(
+          analysis: analysis,
+          derived: derived,
+        );
+    final hasStructuralScreenPresentationEvidence =
+        _hasStructuralScreenPresentationEvidence(
+          analysis: analysis,
+          derived: derived,
+        );
+    final hasUiLikeNonDocumentContext = _hasUiLikeNonDocumentContext(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasDecisiveDocumentEvidence = _hasDecisiveDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+    );
+    final hasMeaningfulDocumentEvidence = _hasMeaningfulDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+      hasDocumentFilenameCue: hasDocumentFilenameCue,
+    );
+    final isNaturalSceneWithoutUiDocumentGraphicEvidence =
+        _isNaturalSceneWithoutUiDocumentGraphicEvidence(
+          analysis: analysis,
+          derived: derived,
+        );
+
+    if (isNaturalSceneWithoutUiDocumentGraphicEvidence) {
+      _vetoRule(
+        scores,
+        'screenshots',
+        'natural scene suppresses screenshot fallback',
+      );
+      _vetoRule(
+        scores,
+        'animation_cartoon_meme',
+        'natural scene suppresses graphic fallback',
+      );
+    }
+
+    if (summary.directPetCueCount <= 1 &&
+        signals.petCentered.score < 0.8 &&
+        (signals.humanCentered.score >= signals.petCentered.score + 0.18 ||
+            summary.portraitCueCount > 0 ||
+            signals.placeLike.score >= signals.petCentered.score + 0.18 ||
+            signals.documentLike.score >= signals.petCentered.score + 0.12 ||
+            signals.screenshotLike.score >= signals.petCentered.score + 0.12)) {
+      _vetoRule(scores, 'pets', 'weak pet cue vetoed by stronger evidence');
+    }
+
+    if (summary.directPetCueCount < 2 &&
+        signals.humanCentered.isStrong &&
+        signals.humanCentered.score >= signals.petCentered.score) {
+      _vetoRule(scores, 'pets', 'portrait evidence suppresses pets');
+    }
+
+    if (summary.directPetCueCount <= 1 &&
+        signals.petCentered.score < 0.9 &&
+        signals.humanCentered.isModerate) {
+      _vetoRule(scores, 'pets', 'human photo evidence suppresses pets');
+    }
+
+    if (summary.directPetCueCount <= 1 &&
+        signals.petCentered.score < 0.95 &&
+        signals.graphicPostLike.isModerate) {
+      _vetoRule(scores, 'pets', 'stylized graphic is not a pet photo');
+    }
+
+    if (summary.weakSportsCueCount > 0 &&
+        summary.strongSportsCueCount == 0 &&
+        (summary.logoTextApparelCueCount > 0 ||
+            summary.documentCueStrength >= 0.5 ||
+            summary.screenshotCueStrength >= 0.5)) {
+      _vetoRule(scores, 'sports', 'weak sports cue without game context');
+    } else if (summary.strongSportsCueCount <= 1 &&
+        summary.sportsContextCueCount == 0 &&
+        summary.logoTextApparelCueCount > 0) {
+      _vetoRule(scores, 'sports', 'sports needs game context');
+    } else if (summary.weakSportsCueCount > 0 &&
+        summary.strongSportsCueStrength < 0.8 &&
+        summary.logoTextApparelCueStrength > summary.strongSportsCueStrength) {
+      _penalizeRule(
+        scores,
+        'sports',
+        0.52,
+        'logo or apparel suppresses sports',
+      );
+    }
+
+    if (summary.documentCueCount <= 1 &&
+        summary.identityDocumentCueCount == 0 &&
+        summary.documentCopyCueCount <= 1 &&
+        !hasDocumentFilenameCue &&
+        summary.documentCueStrength < 0.9 &&
+        summary.logoTextApparelCueCount > 0) {
+      _vetoRule(
+        scores,
+        'documents_receipts',
+        'weak document cue without paperwork context',
+      );
+    }
+
+    if (hasUiLikeNonDocumentContext &&
+        !hasDecisiveDocumentEvidence &&
+        !hasMeaningfulDocumentEvidence) {
+      _vetoRule(
+        scores,
+        'documents_receipts',
+        'ui-like page is not a true document',
+      );
+    }
+
+    if (hasStructuralScreenPresentationEvidence &&
+        summary.placeCueCount > 0 &&
+        summary.strongPlaceCueCount == 0 &&
+        !hasPlaceFilenameCue) {
+      _vetoRule(
+        scores,
+        'places',
+        'screen presentation is not a photographed place',
+      );
+    } else if (hasScreenPresentationAntiDriftEvidence &&
+        summary.strongPlaceCueCount == 0 &&
+        !signals.scenePlaceStrength.isStrong &&
+        summary.placeCueStrength <=
+            summary.screenDeviceCueStrength +
+                summary.presentationCueStrength +
+                0.18) {
+      _vetoRule(
+        scores,
+        'places',
+        'screen presentation is not a photographed place',
+      );
+    }
+
+    if (signals.screenshotLike.isStrong &&
+        summary.strictChatUiCueCount > 0 &&
+        summary.identityDocumentCueCount == 0 &&
+        summary.documentCopyCueCount == 0 &&
+        !analysis.structural.isDocumentLike &&
+        !analysis.structural.hasMrzPattern &&
+        summary.chatUiCueStrength >= summary.documentCueStrength) {
+      _penalizeRule(
+        scores,
+        'documents_receipts',
+        0.42,
+        'chat UI suppresses document-like text',
+      );
+      _boostRule(
+        scores,
+        'screenshots',
+        0.18,
+        'chat screenshot beats document-like text',
+      );
+    }
+
+    if (summary.screenshotCueCount <= 1 &&
+        !hasScreenshotFilenameCue &&
+        summary.screenshotCueStrength < 0.8 &&
+        summary.strictChatUiCueCount == 0 &&
+        summary.logoTextApparelCueCount > 0) {
+      _vetoRule(scores, 'screenshots', 'weak screen cue without UI context');
+    }
+
+    if (!hasScreenshotFilenameCue &&
+        summary.strictChatUiCueCount == 0 &&
+        summary.logoTextApparelCueCount > 0 &&
+        summary.portraitCueCount == 0 &&
+        summary.screenshotCueCount > 0) {
+      _vetoRule(
+        scores,
+        'screenshots',
+        'generic text is not enough for screenshot',
+      );
+    }
+
+    if (summary.sportsGraphicCueCount > 0 &&
+        summary.logoTextApparelCueCount > 0 &&
+        summary.strongPlaceCueCount == 0 &&
+        summary.placeCueStrength <= summary.sportsGraphicCueStrength + 0.12) {
+      _vetoRule(scores, 'places', 'sports graphic is not a photographed place');
+    }
+
+    if (summary.documentCueStrength >= summary.foodCueStrength + 0.24) {
+      _penalizeRule(scores, 'food', 0.18, 'document signal suppresses food');
+    }
+
+    if (summary.travelCueCount > 0 &&
+        summary.travelContextCueCount == 0 &&
+        summary.placeCueCount > 0 &&
+        summary.placeCueStrength >= summary.travelCueStrength - 0.02) {
+      _vetoRule(scores, 'travel', 'generic scenery is not enough for travel');
+    }
+  }
+
+  void _boostRule(
+    List<PlacementScoreCard> scores,
+    String cellId,
+    double amount,
+    String reason,
+  ) {
+    final score = _findScore(scores, cellId);
+    if (score == null) {
+      return;
+    }
+    if (score.vetoed) {
+      return;
+    }
+
+    score.score += amount;
+    score.secondarySupport.add(reason);
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-PRECEDENCE] boost category=$cellId '
+        'amount=${amount.toStringAsFixed(3)} '
+        'reason="$reason" final=${score.score.toStringAsFixed(3)}',
+      );
+    }
+  }
+
+  void _penalizeRule(
+    List<PlacementScoreCard> scores,
+    String cellId,
+    double amount,
+    String reason,
+  ) {
+    final score = _findScore(scores, cellId);
+    if (score == null) {
+      return;
+    }
+    if (score.vetoed) {
+      return;
+    }
+
+    score.score -= amount;
+    score.fallbackOrDebugReasons.add(reason);
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-PRECEDENCE] penalty category=$cellId '
+        'amount=${amount.toStringAsFixed(3)} '
+        'reason="$reason" final=${score.score.toStringAsFixed(3)}',
+      );
+    }
+  }
+
+  void _vetoRule(
+    List<PlacementScoreCard> scores,
+    String cellId,
+    String reason,
+  ) {
+    final score = _findScore(scores, cellId);
+    if (score == null) {
+      return;
+    }
+
+    score.vetoed = true;
+    score.fallbackOrDebugReasons.add(reason);
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-PRECEDENCE] veto category=$cellId reason="$reason" '
+        'score=${score.score.toStringAsFixed(3)}',
+      );
+    }
+  }
+
+  PlacementScoreCard? _findScore(
+    List<PlacementScoreCard> scores,
+    String cellId,
+  ) {
+    for (final score in scores) {
+      if (score.rule.cellId == cellId) {
+        return score;
+      }
+    }
+    return null;
+  }
+}
+
+class CategoryEntryGateStage {
+  const CategoryEntryGateStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  void apply({
+    required List<PlacementScoreCard> scores,
+    required AssetAnalysis analysis,
+  }) {
+    final derived = DerivedSignals.from(analysis);
+    for (final score in scores) {
+      if (score.vetoed) {
+        continue;
+      }
+
+      final rejectionReason = _rejectionReason(
+        score: score,
+        analysis: analysis,
+        derived: derived,
+      );
+      if (rejectionReason == null) {
+        continue;
+      }
+
+      score.vetoed = true;
+      score.fallbackOrDebugReasons.add(rejectionReason);
+      if (kDebugMode) {
+        debugPrint(
+          '[HIVE-GATE] category=${score.rule.cellId} '
+          'score=${score.score.toStringAsFixed(3)} '
+          'veto="$rejectionReason"',
+        );
+      }
+    }
+  }
+
+  String? _rejectionReason({
+    required PlacementScoreCard score,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final summary = analysis.cueSummary;
+    final signals = analysis.signals;
+    final hasScreenPresentationAntiDriftEvidence =
+        _hasScreenPresentationAntiDriftEvidence(
+          analysis: analysis,
+          derived: derived,
+        );
+
+    return switch (score.rule.cellId) {
+      'people' => _rejectPeople(
+        score: score.score,
+        summary: summary,
+        signals: signals,
+      ),
+      'food' => _rejectFood(
+        score: score.score,
+        analysis: analysis,
+        summary: summary,
+        derived: derived,
+        structural: analysis.structural,
+      ),
+      'documents_receipts' => _rejectDocuments(
+        score: score.score,
+        analysis: analysis,
+        derived: derived,
+      ),
+      'places' => _rejectPlaces(
+        score: score.score,
+        analysis: analysis,
+        summary: summary,
+        signals: signals,
+        hasScreenPresentationAntiDriftEvidence:
+            hasScreenPresentationAntiDriftEvidence,
+      ),
+      'nature' => _rejectNature(analysis: analysis),
+      'vehicles' => _rejectVehicles(analysis: analysis),
+      'screenshots' => _rejectScreenshots(analysis: analysis, derived: derived),
+      'devices_tech' => _rejectDevicesStrict(
+        analysis: analysis,
+        derived: derived,
+      ),
+      'pets' => _rejectPets(
+        summary: summary,
+        signals: signals,
+        analysis: analysis,
+        derived: derived,
+      ),
+      'travel' => _rejectTravel(summary: summary, analysis: analysis),
+      'receipts' => _rejectReceipts(analysis: analysis),
+      'sports' => _rejectSports(summary: summary, signals: signals),
+      'animation' => _rejectAnimationCartoonMeme(
+        analysis: analysis,
+        derived: derived,
+      ),
+      'memes' => _rejectMemes(analysis: analysis),
+      'animation_cartoon_meme' => _rejectAnimationCartoonMeme(
+        analysis: analysis,
+        derived: derived,
+      ),
+      _ => null,
+    };
+  }
+
+  String? _rejectPeople({
+    required double score,
+    required CueSummary summary,
+    required AnalysisSignals signals,
+  }) {
+    final hasUsableHumanEvidence =
+        signals.humanPresence.isModerate ||
+        (summary.peopleCueCount > 0 && summary.peopleCueStrength >= 0.54) ||
+        summary.portraitCueCount > 0 ||
+        summary.crowdCueCount > 0;
+    if (hasUsableHumanEvidence || score >= 0.5) {
+      return null;
+    }
+    return 'people gate needs clearer human evidence';
+  }
+
+  String? _rejectFood({
+    required double score,
+    required AssetAnalysis analysis,
+    required CueSummary summary,
+    required DerivedSignals derived,
+    required StructuralSignals structural,
+  }) {
+    if (_isFoodPackagingOrDessertLike(analysis)) {
+      return null;
+    }
+    final hasUsableFoodEvidence =
+        summary.strongFoodCueCount > 0 ||
+        summary.foodCueCount >= 2 ||
+        (summary.foodCueCount > 0 && summary.foodCueStrength >= 0.72);
+    final lightNonDocumentFood =
+        summary.foodCueCount >= 1 &&
+        !structural.hasTableLikeLayout &&
+        derived.documentnessScore < 0.40;
+    if (hasUsableFoodEvidence ||
+        lightNonDocumentFood ||
+        score >= 0.58) {
+      return null;
+    }
+    return 'food gate needs clearer meal evidence';
+  }
+
+  String? _rejectTravel({
+    required CueSummary summary,
+    required AssetAnalysis analysis,
+  }) {
+    final hasTravelFilenameCue =
+        _matcher.matchesFilenameCue(
+          normalizedFilename: analysis.normalizedFilename,
+          filenameTokens: analysis.filenameTokens,
+          cues: KeywordPlacementDefinitions.travelCueKeywords,
+          matchPolicy: _strictKeywordMatchPolicy,
+        ) ||
+        _matcher.matchesFilenameCue(
+          normalizedFilename: analysis.normalizedFilename,
+          filenameTokens: analysis.filenameTokens,
+          cues: KeywordPlacementDefinitions.travelContextCueKeywords,
+          matchPolicy: _strictKeywordMatchPolicy,
+        );
+    final hasUsableTravelEvidence =
+        hasTravelFilenameCue ||
+        summary.travelCueCount > 0 ||
+        summary.travelContextCueCount > 0;
+    if (hasUsableTravelEvidence) {
+      return null;
+    }
+    return 'travel gate requires trip or destination evidence';
+  }
+
+  String? _rejectReceipts({required AssetAnalysis analysis}) {
+    final summary = analysis.cueSummary;
+    if (analysis.structural.hasMrzPattern) {
+      return 'receipts gate yields to MRZ document';
+    }
+    if (summary.identityDocumentCueCount >= 1) {
+      return 'receipts gate yields to identity document';
+    }
+    if (summary.documentCopyCueCount >= 2 &&
+        _receiptOcrTokenCount(analysis) == 0) {
+      return 'receipts gate yields to document copy evidence';
+    }
+    if (analysis.signals.humanCentered.isStrong) {
+      return 'receipts gate yields to dominant person';
+    }
+    if (analysis.signals.placeLike.isStrong &&
+        _hasLandmarkPlaceAnchor(analysis)) {
+      return 'receipts gate yields to landmark place';
+    }
+    if (_hasStrongReceiptEvidence(analysis)) {
+      return null;
+    }
+    return 'receipts gate needs clearer receipt evidence';
+  }
+
+  String? _rejectDocuments({
+    required double score,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final hasDocumentFilenameCue = _matcher.matchesFilenameCue(
+      normalizedFilename: analysis.normalizedFilename,
+      filenameTokens: analysis.filenameTokens,
+      cues: KeywordPlacementDefinitions.documentFilenameKeywords,
+      matchPolicy: _strictKeywordMatchPolicy,
+    );
+    final hasUsableDocumentEvidence = _hasMeaningfulDocumentEvidence(
+      analysis: analysis,
+      derived: derived,
+      hasDocumentFilenameCue: hasDocumentFilenameCue,
+    );
+    if (hasUsableDocumentEvidence) {
+      return null;
+    }
+    if (score >= 0.9 &&
+        analysis.signals.documentLike.isStrong &&
+        !_hasUiLikeNonDocumentContext(analysis: analysis, derived: derived)) {
+      return null;
+    }
+    return 'documents gate needs clearer paperwork evidence';
+  }
+
+  String? _rejectPlaces({
+    required double score,
+    required AssetAnalysis analysis,
+    required CueSummary summary,
+    required AnalysisSignals signals,
+    required bool hasScreenPresentationAntiDriftEvidence,
+  }) {
+    final hasUsableSceneEvidence = _hasMeaningfulPlaceEvidence(
+      summary: summary,
+      signals: signals,
+    );
+    final hasMosqueArchitecturePlaceEvidence =
+        _hasMosqueArchitecturePlaceEvidence(analysis);
+    final hasNaturalSceneCluster = _hasNaturalSceneCluster(analysis);
+    if (kDebugMode &&
+        (hasUsableSceneEvidence ||
+            hasNaturalSceneCluster ||
+            hasMosqueArchitecturePlaceEvidence ||
+            _mosqueArchitectureCueCount(analysis) > 0)) {
+      debugPrint(
+        '[HIVE-SCENE] placesGate score=${score.toStringAsFixed(3)} '
+        'placeCueCount=${summary.placeCueCount} '
+        'strongPlaceCueCount=${summary.strongPlaceCueCount} '
+        'mosqueArchitecture=$hasMosqueArchitecturePlaceEvidence '
+        'mosqueCueCount=${_mosqueArchitectureCueCount(analysis)}',
+      );
+    }
+    if (hasScreenPresentationAntiDriftEvidence && !hasUsableSceneEvidence) {
+      return 'places gate needs clearer scene evidence';
+    }
+    if (hasUsableSceneEvidence ||
+        hasNaturalSceneCluster ||
+        hasMosqueArchitecturePlaceEvidence) {
+      return null;
+    }
+    if (score >= 0.72 && signals.scenePlaceStrength.isStrong) {
+      return null;
+    }
+    return 'places gate needs clearer scene evidence';
+  }
+
+  String? _rejectNature({required AssetAnalysis analysis}) {
+    final summary = analysis.cueSummary;
+    if (!_hasStrongNatureEvidence(analysis)) {
+      return 'nature gate needs clearer natural scene evidence';
+    }
+    final derivedForGate = DerivedSignals.from(analysis);
+    if (_hasDominantVehiclePhotoEvidence(analysis)) {
+      return 'nature gate yields to vehicle subject';
+    }
+    if (_isPrintedMangaComicCoverLike(analysis) ||
+        _isArtworkOrAnimationLike(analysis, derivedForGate)) {
+      return 'nature gate yields to illustrated subject';
+    }
+    if (_isPhoneScreenPhotoLike(analysis, derivedForGate)) {
+      return 'nature gate yields to device screen presentation';
+    }
+    if (_isFoodPackagingOrDessertLike(analysis)) {
+      return 'nature gate yields to food packaging signal';
+    }
+    if (analysis.signals.humanCentered.isStrong) {
+      return 'nature gate yields to dominant person';
+    }
+    if (analysis.signals.placeLike.isStrong &&
+        _hasLandmarkPlaceAnchor(analysis)) {
+      return 'nature gate yields to landmark place';
+    }
+    if (summary.travelContextCueCount >= 2) {
+      return 'nature gate yields to travel context';
+    }
+    return null;
+  }
+
+  String? _rejectVehicles({required AssetAnalysis analysis}) {
+    if (_hasDominantVehiclePhotoEvidence(analysis)) {
+      return null;
+    }
+    if (_hasPrimaryVehicleSubjectCue(analysis)) {
+      return null;
+    }
+    if (!_hasStrongVehicleEvidence(analysis)) {
+      return 'vehicles gate needs clearer vehicle evidence';
+    }
+    if (analysis.signals.humanCentered.isStrong) {
+      return 'vehicles gate yields to dominant person';
+    }
+    if (analysis.signals.placeLike.isStrong &&
+        _hasLandmarkPlaceAnchor(analysis)) {
+      return 'vehicles gate yields to landmark place';
+    }
+    return null;
+  }
+
+  String? _rejectScreenshots({
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    if (_hasScreenshotRankingEvidence(analysis: analysis, derived: derived)) {
+      return null;
+    }
+    return 'screenshots gate requires screenshot or UI evidence';
+  }
+
+  String? _rejectDevicesStrict({
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final summary = analysis.cueSummary;
+    if (_hasRealPhysicalTechDeviceEvidence(analysis) ||
+        summary.screenDeviceCueStrength >= 0.94 ||
+        summary.presentationCueCount > 0) {
+      return null;
+    }
+
+    if (_isPrintedMangaComicCoverLike(analysis)) {
+      return 'devices gate prefers illustrated manga cover cues';
+    }
+    final stackLooksIllustrated =
+        _isArtworkOrAnimationLike(analysis, derived) ||
+            summary.animationCueCount >= 2;
+    if (stackLooksIllustrated && summary.screenDeviceCueCount == 0) {
+      return 'devices gate needs physical gadget evidence';
+    }
+    return null;
+  }
+
+  String? _rejectPets({
+    required CueSummary summary,
+    required AnalysisSignals signals,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final hasStrongPetEvidence =
+        _hasMeaningfulAnimalFallbackEvidence(
+          analysis: analysis,
+          derived: derived,
+        ) &&
+        (summary.directPetCueCount >= 2 ||
+            (summary.directPetCueStrength >= 0.9 &&
+                signals.humanPresence.score <
+                    signals.animalPresence.score + 0.06 &&
+                !signals.graphicMemeNess.isModerate &&
+                !signals.scenePlaceStrength.isStrong));
+    if (hasStrongPetEvidence) {
+      return null;
+    }
+    return 'pets gate requires stronger animal evidence';
+  }
+
+  String? _rejectSports({
+    required CueSummary summary,
+    required AnalysisSignals signals,
+  }) {
+    final hasStrongSportsEvidence =
+        signals.sportsGraphicLike.isStrong ||
+        (summary.strongSportsCueCount >= 2 &&
+            summary.sportsContextCueCount > 0) ||
+        (summary.strongSportsCueStrength >= 1.08 &&
+            summary.sportsContextCueCount > 0);
+    if (hasStrongSportsEvidence) {
+      return null;
+    }
+    return 'sports gate requires stronger game evidence';
+  }
+
+  String? _rejectAnimationCartoonMeme({
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    if (_isPrintedMangaComicCoverLike(analysis) ||
+        _isArtworkOrAnimationLike(analysis, derived)) {
+      return null;
+    }
+    if (_isNonPhotographicArtwork(analysis) &&
+        !_hasProtectedDocumentIdentitySignalStrict(analysis)) {
+      return null;
+    }
+    if (_weakCartoonHumanFaceCase(analysis, derived)) {
+      return null;
+    }
+    final strongestPeopleLikeLabel = _strongestPeopleLikeLabelConfidence(analysis);
+    final hasMeaningfulStructuralFace =
+        analysis.structural.faceCount >= 1 &&
+        analysis.structural.largestFaceAreaRatio >= 0.06;
+    final weakPeopleLabelsOnly =
+        strongestPeopleLikeLabel > 0 && strongestPeopleLikeLabel < 0.55 && !hasMeaningfulStructuralFace;
+    if (weakPeopleLabelsOnly && _hasStylizedNonPhotoHint(analysis)) {
+      return null;
+    }
+    if (analysis.signals.hasConfirmedMemeSubtype) {
+      return null;
+    }
+    if (analysis.signals.captionOverlayPhotoMemeLike.isModerate &&
+        !analysis.signals.hasProtectedDocumentIdentitySignal) {
+      return null;
+    }
+    if (_hasAnimationHardGateEvidence(analysis)) {
+      return null;
+    }
+    return 'animation gate requires graphic or stylized evidence';
+  }
+
+  String? _rejectMemes({required AssetAnalysis analysis}) {
+    if (_hasOverlayMemeEvidence(analysis) &&
+        !analysis.signals.hasProtectedDocumentIdentitySignal) {
+      return null;
+    }
+    return 'memes gate requires overlay or meme structure evidence';
+  }
+}
+
+class PlacementDecisionStage {
+  const PlacementDecisionStage();
+
+  AssetMappingExplanation resolve({
+    required List<PlacementScoreCard> scores,
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+  }) {
+    final ranked =
+        scores.where((score) => !score.vetoed).toList(growable: false)
+          ..sort((left, right) => right.score.compareTo(left.score));
+
+    if (kDebugMode) {
+      final rankedScores = ranked
+          .map(
+            (score) => '${score.rule.cellId}:${score.score.toStringAsFixed(3)}',
+          )
+          .join(', ');
+      debugPrint('[HIVE-DECISION] ranked final scores=[$rankedScores]');
+    }
+
+    if (ranked.isEmpty) {
+      return _buildUnsortedExplanation(
+        analysis: analysis,
+        derived: derived,
+
+        bestScore: 0,
+        primaryEvidence: const <String>[],
+        secondarySupport: const <String>[],
+        fallbackOrDebugReasons: const <String>[],
+      );
+    }
+
+    final best = ranked.first;
+    final second = ranked.length > 1 ? ranked[1] : null;
+    final margin = second == null ? best.score : best.score - second.score;
+    final hasStrongSupport = _hasStrongSupport(
+      cellId: best.rule.cellId,
+      analysis: analysis,
+    );
+    final hasMosqueArchitecturePlaceEvidence =
+        _hasMosqueArchitecturePlaceEvidence(analysis);
+
+    void debugSceneDecision(String outcome) {
+      if (!kDebugMode ||
+          (best.rule.cellId != 'places' &&
+              !_hasNaturalSceneCluster(analysis) &&
+              !hasMosqueArchitecturePlaceEvidence &&
+              analysis.cueSummary.placeCueCount == 0 &&
+              analysis.cueSummary.strongPlaceCueCount == 0)) {
+        return;
+      }
+
+      debugPrint(
+        '[HIVE-SCENE] decision top=${best.rule.cellId} '
+        'runner=${second?.rule.cellId ?? "none"} '
+        'score=${best.score.toStringAsFixed(3)} '
+        'margin=${second == null ? "n/a" : margin.toStringAsFixed(3)} '
+        'placeCueCount=${analysis.cueSummary.placeCueCount} '
+        'strongPlaceCueCount=${analysis.cueSummary.strongPlaceCueCount} '
+        'mosqueArchitecture=$hasMosqueArchitecturePlaceEvidence '
+        'mosqueCueCount=${_mosqueArchitectureCueCount(analysis)} '
+        'outcome="$outcome"',
+      );
+    }
+
+    if (second != null && kDebugMode) {
+      debugPrint(
+        '[HIVE-DECISION] margin=${margin.toStringAsFixed(3)} '
+        'winner=${best.rule.cellId} '
+        'runner=${second.rule.cellId} '
+        '${margin < KeywordPlacementDefinitions.kMinWinningScoreMargin && best.score < 1.0 ? "→ UNSORTED (narrow margin)" : "→ RESOLVED"}',
+      );
+    }
+
+    if (second != null &&
+        margin < KeywordPlacementDefinitions.kMinWinningScoreMargin &&
+        best.score < 1.0) {
+      debugSceneDecision('sent to Unsorted: narrow winning margin');
+      final marginReason = 'margin too narrow ${margin.toStringAsFixed(2)}';
+      return _buildUnsortedExplanation(
+        analysis: analysis,
+        derived: derived,
+        bestScore: best.score,
+        primaryEvidence: [
+          ...best.primaryEvidence,
+          'top candidate ${best.rule.cellName}',
+          'runner-up ${second.rule.cellName}',
+          marginReason,
+          'required margin '
+              '${KeywordPlacementDefinitions.kMinWinningScoreMargin.toStringAsFixed(2)}',
+          'unsorted fallback ambiguous multi',
+        ],
+        secondarySupport: best.secondarySupport,
+        fallbackOrDebugReasons: best.fallbackOrDebugReasons,
+        best: best,
+        second: second,
+        blockedByMargin: true,
+        blockedByLowConfidence: false,
+        finalDecisionSummary:
+            'Unsorted because ${best.rule.cellName} only led '
+            '${second.rule.cellName} by ${margin.toStringAsFixed(2)}, '
+            'below the ${KeywordPlacementDefinitions.kMinWinningScoreMargin.toStringAsFixed(2)} margin requirement.',
+      );
+    }
+
+    if (best.score < KeywordPlacementDefinitions.fallbackThreshold &&
+        !hasStrongSupport) {
+      debugSceneDecision('sent to Unsorted: low confidence');
+      return _buildUnsortedExplanation(
+        analysis: analysis,
+        derived: derived,
+
+        bestScore: best.score,
+        primaryEvidence: best.primaryEvidence,
+        secondarySupport: best.secondarySupport,
+        fallbackOrDebugReasons: best.fallbackOrDebugReasons,
+        best: best,
+        second: second,
+        blockedByMargin: false,
+        blockedByLowConfidence: true,
+        finalDecisionSummary:
+            'Unsorted because ${best.rule.cellName} scored '
+            '${best.score.toStringAsFixed(2)} without strong support, '
+            'below the confidence requirement.',
+      );
+    }
+
+    if (margin < KeywordPlacementDefinitions.fallbackMarginThreshold &&
+        best.score < KeywordPlacementDefinitions.confidentPlacementThreshold &&
+        !hasStrongSupport) {
+      debugSceneDecision('sent to Unsorted: fallback margin');
+      return _buildUnsortedExplanation(
+        analysis: analysis,
+        derived: derived,
+
+        bestScore: best.score,
+        primaryEvidence: best.primaryEvidence,
+        secondarySupport: best.secondarySupport,
+        fallbackOrDebugReasons: best.fallbackOrDebugReasons,
+        best: best,
+        second: second,
+        forcedReason: UnsortedFallbackReason.ambiguousMulti,
+        blockedByMargin: true,
+        blockedByLowConfidence: false,
+        finalDecisionSummary: second == null
+            ? null
+            : 'Unsorted because ${best.rule.cellName} only led '
+                  '${second.rule.cellName} by ${margin.toStringAsFixed(2)}, '
+                  'below the ${KeywordPlacementDefinitions.fallbackMarginThreshold.toStringAsFixed(2)} margin requirement.',
+      );
+    }
+
+    debugSceneDecision(
+      best.rule.cellId == 'places'
+          ? 'kept in Places'
+          : 'resolved to ${best.rule.cellId}',
+    );
+
+    return AssetMappingExplanation(
+      cellId: best.rule.cellId,
+      cellName: best.rule.cellName,
+      score: best.score,
+      usedFallback: false,
+      topLabels: analysis.topLabels,
+      primaryEvidence: best.primaryEvidence.toList(growable: false),
+      secondarySupport: best.secondarySupport.toList(growable: false),
+      fallbackOrDebugReasons: best.fallbackOrDebugReasons.toList(
+        growable: false,
+      ),
+      topCandidateCellId: best.rule.cellId,
+      topCandidateCellName: best.rule.cellName,
+      topCandidateScore: best.score,
+      runnerUpCellId: second?.rule.cellId,
+      runnerUpCellName: second?.rule.cellName,
+      runnerUpScore: second?.score,
+      winningMargin: second == null ? null : margin,
+      requiredMargin: KeywordPlacementDefinitions.fallbackMarginThreshold,
+      fallbackThreshold: KeywordPlacementDefinitions.fallbackThreshold,
+      blockedByMargin: false,
+      blockedByLowConfidence: false,
+      finalDecisionSummary: second == null
+          ? '${best.rule.cellName} won with score ${best.score.toStringAsFixed(2)}.'
+          : '${best.rule.cellName} won with score ${best.score.toStringAsFixed(2)}, '
+                'ahead of ${second.rule.cellName} by ${margin.toStringAsFixed(2)}.',
+    );
+  }
+
+  bool _hasStrongSupport({
+    required String cellId,
+    required AssetAnalysis analysis,
+  }) {
+    final summary = analysis.cueSummary;
+    final signals = analysis.signals;
+    final derived = DerivedSignals.from(analysis);
+
+    return switch (cellId) {
+      'people' => signals.humanPresence.isModerate || summary.crowdCueCount > 0,
+      'pets' => _hasMeaningfulAnimalFallbackEvidence(
+        analysis: analysis,
+        derived: derived,
+      ),
+      'travel' =>
+        summary.travelContextCueCount > 0 &&
+            (summary.travelContextCueStrength >= 0.9 ||
+                summary.travelCueCount >= 2 ||
+                summary.placeCueCount > 0),
+      'places' =>
+        _hasMeaningfulPlaceEvidence(summary: summary, signals: signals) ||
+            _hasMosqueArchitecturePlaceEvidence(analysis),
+      'nature' => _hasStrongNatureEvidence(analysis),
+      'vehicles' => _hasStrongVehicleEvidence(analysis),
+      'food' =>
+        (summary.strongFoodCueCount > 0 &&
+                summary.strongFoodCueStrength >= 0.8) ||
+            summary.foodCueCount >= 2 ||
+            (summary.foodCueCount > 0 && summary.foodCueStrength >= 0.72) ||
+            summary.foodCueStrength >= 0.95,
+      'screenshots' =>
+        signals.screenshotLike.isStrong || summary.strictChatUiCueCount > 0,
+      'devices_tech' => _hasStrongScreenPresentationSupport(
+        analysis: analysis,
+        derived: derived,
+      ),
+      'documents_receipts' => _hasMeaningfulDocumentEvidence(
+        analysis: analysis,
+        derived: derived,
+        hasDocumentFilenameCue: false,
+      ),
+      'receipts' => _hasStrongReceiptEvidence(analysis),
+      'sports' =>
+        (summary.strongSportsCueCount >= 2 &&
+                summary.sportsContextCueCount > 0) ||
+            summary.strongSportsCueStrength >= 1.08 ||
+            signals.sportsGraphicLike.isStrong,
+      'animation_cartoon_meme' => _hasAnimationHardGateEvidence(analysis),
+      _ => false,
+    };
+  }
+
+  AssetMappingExplanation _buildUnsortedExplanation({
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+    required double bestScore,
+    required Iterable<String> primaryEvidence,
+    required Iterable<String> secondarySupport,
+    required Iterable<String> fallbackOrDebugReasons,
+    PlacementScoreCard? best,
+    PlacementScoreCard? second,
+    UnsortedFallbackReason? forcedReason,
+    bool? blockedByMargin,
+    bool? blockedByLowConfidence,
+    String? finalDecisionSummary,
+  }) {
+    final fallbackReason =
+        forcedReason ??
+        _inferFallbackReason(analysis: analysis, best: best, second: second);
+    final margin = best != null && second != null
+        ? best.score - second.score
+        : null;
+    final unsortedReason = _inferUnsortedReason(
+      analysis: analysis,
+      derived: derived,
+      best: best,
+      second: second,
+    );
+    final effectivePrimaryEvidence = <String>[
+      ...primaryEvidence,
+      if (fallbackReason == UnsortedFallbackReason.ambiguousMulti &&
+          best != null)
+        'top candidate ${best.rule.cellName}',
+      if (fallbackReason == UnsortedFallbackReason.ambiguousMulti &&
+          second != null)
+        'runner-up ${second.rule.cellName}',
+      if (fallbackReason == UnsortedFallbackReason.ambiguousMulti &&
+          margin != null)
+        'margin too narrow ${margin.toStringAsFixed(2)}',
+      if (fallbackReason == UnsortedFallbackReason.ambiguousMulti)
+        'required margin '
+            '${KeywordPlacementDefinitions.fallbackMarginThreshold.toStringAsFixed(2)}',
+      if (fallbackReason == UnsortedFallbackReason.ambiguousMulti)
+        'unsorted fallback ambiguous multi',
+    ];
+    return AssetMappingExplanation(
+      cellId: KeywordPlacementDefinitions.unsortedRule.cellId,
+      cellName: KeywordPlacementDefinitions.unsortedRule.cellName,
+      score: bestScore,
+      usedFallback: true,
+      topLabels: analysis.topLabels,
+      primaryEvidence: effectivePrimaryEvidence,
+      secondarySupport: secondarySupport.toList(growable: false),
+      fallbackOrDebugReasons: [
+        ...fallbackOrDebugReasons,
+        _fallbackKeywordFor(fallbackReason),
+      ],
+      fallbackReason: fallbackReason,
+      unsortedReason: unsortedReason,
+      topCandidateCellId: best?.rule.cellId,
+      topCandidateCellName: best?.rule.cellName,
+      topCandidateScore: best?.score,
+      runnerUpCellId: second?.rule.cellId,
+      runnerUpCellName: second?.rule.cellName,
+      runnerUpScore: second?.score,
+      winningMargin: margin,
+      requiredMargin: KeywordPlacementDefinitions.fallbackMarginThreshold,
+      fallbackThreshold: KeywordPlacementDefinitions.fallbackThreshold,
+      blockedByMargin:
+          blockedByMargin ??
+          (fallbackReason == UnsortedFallbackReason.ambiguousMulti),
+      blockedByLowConfidence:
+          blockedByLowConfidence ??
+          (fallbackReason != UnsortedFallbackReason.ambiguousMulti &&
+              fallbackReason != UnsortedFallbackReason.noSignal),
+      finalDecisionSummary:
+          finalDecisionSummary ??
+          _finalDecisionSummaryForUnsorted(
+            fallbackReason: fallbackReason,
+            best: best,
+            second: second,
+            bestScore: bestScore,
+            margin: margin,
+          ),
+    );
+  }
+
+  String _finalDecisionSummaryForUnsorted({
+    required UnsortedFallbackReason fallbackReason,
+    required PlacementScoreCard? best,
+    required PlacementScoreCard? second,
+    required double bestScore,
+    required double? margin,
+  }) {
+    if (best == null) {
+      return 'Unsorted because no category had enough usable evidence.';
+    }
+
+    if (fallbackReason == UnsortedFallbackReason.ambiguousMulti &&
+        second != null &&
+        margin != null) {
+      return 'Unsorted because ${best.rule.cellName} only led '
+          '${second.rule.cellName} by ${margin.toStringAsFixed(2)}, '
+          'below the ${KeywordPlacementDefinitions.fallbackMarginThreshold.toStringAsFixed(2)} margin requirement.';
+    }
+
+    if (fallbackReason == UnsortedFallbackReason.noSignal) {
+      return 'Unsorted because no category had enough usable evidence.';
+    }
+
+    return 'Unsorted because ${best.rule.cellName} scored '
+        '${bestScore.toStringAsFixed(2)} without strong support, '
+        'below the confidence requirement.';
+  }
+
+  UnsortedReason _inferUnsortedReason({
+    required AssetAnalysis analysis,
+    required DerivedSignals derived,
+    PlacementScoreCard? best,
+    PlacementScoreCard? second,
+  }) {
+    if (derived.humanPresenceScore >= 0.35) {
+      return UnsortedReason.lowConfidenceHuman;
+    }
+
+    final hasFoodLabel = analysis.scoringLabels.any((label) {
+      final name = label.displayName.toLowerCase();
+      return label.confidence >= 0.25 &&
+          (name.contains('food') ||
+              name.contains('meal') ||
+              name.contains('dish') ||
+              name.contains('drink') ||
+              name.contains('restaurant') ||
+              name.contains('plate') ||
+              name.contains('breakfast') ||
+              name.contains('lunch') ||
+              name.contains('dinner'));
+    });
+
+    if (hasFoodLabel) {
+      return UnsortedReason.lowConfidenceFood;
+    }
+
+    if (best != null &&
+        second != null &&
+        best.score - second.score <
+            KeywordPlacementDefinitions.kMinWinningScoreMargin &&
+        best.score < 1.0) {
+      return UnsortedReason.ambiguousMulti;
+    }
+
+    if (_hasScreenPresentationAntiDriftEvidence(
+      analysis: analysis,
+      derived: derived,
+    )) {
+      return UnsortedReason.noSignal;
+    }
+
+    if (_hasNaturalSceneCluster(analysis)) {
+      return UnsortedReason.lowConfidenceScene;
+    }
+
+    if (derived.sceneDensityScore >= 0.30) {
+      return UnsortedReason.lowConfidenceScene;
+    }
+
+    if (best != null &&
+        second != null &&
+        (best.score - second.score).abs() <= 12) {
+      return UnsortedReason.ambiguousMulti;
+    }
+
+    return UnsortedReason.noSignal;
+  }
+
+  UnsortedFallbackReason _inferFallbackReason({
+    required AssetAnalysis analysis,
+    PlacementScoreCard? best,
+    PlacementScoreCard? second,
+  }) {
+    if (best != null &&
+        second != null &&
+        (best.score - second.score) < 0.12 &&
+        second.score >= 0.42) {
+      return UnsortedFallbackReason.ambiguousMulti;
+    }
+
+    final summary = analysis.cueSummary;
+    final signals = analysis.signals;
+    final derived = DerivedSignals.from(analysis);
+
+    if (signals.humanPresence.isPresent) {
+      return UnsortedFallbackReason.lowConfidenceHuman;
+    }
+    if (summary.foodCueCount > 0 || summary.strongFoodCueCount > 0) {
+      return UnsortedFallbackReason.lowConfidenceFood;
+    }
+    if (_hasScreenPresentationAntiDriftEvidence(
+      analysis: analysis,
+      derived: derived,
+    )) {
+      return UnsortedFallbackReason.lowConfidenceDocument;
+    }
+    if (_hasNaturalSceneCluster(analysis)) {
+      return UnsortedFallbackReason.lowConfidenceScene;
+    }
+    if (signals.scenePlaceStrength.isPresent ||
+        summary.travelCueCount > 0 ||
+        summary.travelContextCueCount > 0) {
+      return UnsortedFallbackReason.lowConfidenceScene;
+    }
+    if (_hasMeaningfulAnimalFallbackEvidence(
+      analysis: analysis,
+      derived: derived,
+    )) {
+      return UnsortedFallbackReason.lowConfidenceAnimal;
+    }
+    if (summary.strongSportsCueCount > 0 ||
+        summary.weakSportsCueCount > 0 ||
+        summary.sportsGraphicCueCount > 0) {
+      return UnsortedFallbackReason.lowConfidenceSports;
+    }
+    if (signals.documentness.isPresent) {
+      return UnsortedFallbackReason.lowConfidenceDocument;
+    }
+    return UnsortedFallbackReason.noSignal;
+  }
+
+  String _fallbackKeywordFor(UnsortedFallbackReason reason) {
+    return switch (reason) {
+      UnsortedFallbackReason.lowConfidenceHuman =>
+        'fallback lowConfidenceHuman',
+      UnsortedFallbackReason.lowConfidenceFood => 'fallback lowConfidenceFood',
+      UnsortedFallbackReason.lowConfidenceScene =>
+        'fallback lowConfidenceScene',
+      UnsortedFallbackReason.lowConfidenceAnimal =>
+        'fallback lowConfidenceAnimal',
+      UnsortedFallbackReason.lowConfidenceSports =>
+        'fallback lowConfidenceSports',
+      UnsortedFallbackReason.lowConfidenceDocument =>
+        'fallback lowConfidenceDocument',
+      UnsortedFallbackReason.ambiguousMulti => 'fallback ambiguousMulti',
+      UnsortedFallbackReason.noSignal => 'fallback noSignal',
+    };
+  }
+}
+
+class SubjectSignalStage {
+  const SubjectSignalStage({
+    PlacementKeywordMatcher matcher = const PlacementKeywordMatcher(),
+  }) : _matcher = matcher;
+
+  final PlacementKeywordMatcher _matcher;
+
+  CueSummary summarize(List<ClassificationLabel> labels) {
+    var familyCueCount = 0;
+    var peopleCueCount = 0;
+    var directPetCueCount = 0;
+    var foodCueCount = 0;
+    var strongFoodCueCount = 0;
+    var diningContextCueCount = 0;
+    var placeCueCount = 0;
+    var strongPlaceCueCount = 0;
+    var natureCueCount = 0;
+    var vehicleCueCount = 0;
+    var screenshotCueCount = 0;
+    var screenDeviceCueCount = 0;
+    var presentationCueCount = 0;
+    var documentCueCount = 0;
+    var identityDocumentCueCount = 0;
+    var documentCopyCueCount = 0;
+    var receiptCueCount = 0;
+    var animationCueCount = 0;
+    var crowdCueCount = 0;
+    var travelCueCount = 0;
+    var travelContextCueCount = 0;
+    var strongSportsCueCount = 0;
+    var weakSportsCueCount = 0;
+    var portraitCueCount = 0;
+    var groupPeopleCueCount = 0;
+    var strongFamilyCueCount = 0;
+    var sportsContextCueCount = 0;
+    var sportsGraphicCueCount = 0;
+    var chatUiCueCount = 0;
+    var strictChatUiCueCount = 0;
+    var logoTextApparelCueCount = 0;
+    var familyCueStrength = 0.0;
+    var peopleCueStrength = 0.0;
+    var directPetCueStrength = 0.0;
+    var foodCueStrength = 0.0;
+    var strongFoodCueStrength = 0.0;
+    var diningContextCueStrength = 0.0;
+    var placeCueStrength = 0.0;
+    var strongPlaceCueStrength = 0.0;
+    var natureCueStrength = 0.0;
+    var vehicleCueStrength = 0.0;
+    var screenshotCueStrength = 0.0;
+    var screenDeviceCueStrength = 0.0;
+    var presentationCueStrength = 0.0;
+    var documentCueStrength = 0.0;
+    var receiptCueStrength = 0.0;
+    var chatUiCueStrength = 0.0;
+    var travelCueStrength = 0.0;
+    var travelContextCueStrength = 0.0;
+    var strongSportsCueStrength = 0.0;
+    var sportsGraphicCueStrength = 0.0;
+    var logoTextApparelCueStrength = 0.0;
+
+    for (final label in labels) {
+      final normalized = _matcher.normalize(label.displayName);
+      final tokens = _matcher.tokenize(normalized);
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.familyCueKeywords,
+      )) {
+        familyCueCount += 1;
+        familyCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.peopleCueKeywords,
+      )) {
+        peopleCueCount += 1;
+        peopleCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.portraitCueKeywords,
+      )) {
+        portraitCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.groupPeopleCueKeywords,
+      )) {
+        groupPeopleCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.strongFamilyCueKeywords,
+      )) {
+        strongFamilyCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.directPetCueKeywords,
+      )) {
+        directPetCueCount += 1;
+        directPetCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.foodCueKeywords,
+      )) {
+        foodCueCount += 1;
+        foodCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.strongFoodCueKeywords,
+      )) {
+        strongFoodCueCount += 1;
+        strongFoodCueStrength += label.confidence;
+      }
+
+      final hasPrimaryDiningContextCue = _matcher.matchesCueSetStrict(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.diningContextCueKeywords,
+      );
+      final hasSupportOnlyDiningContextCue =
+          foodCueCount >= KeywordPlacementDefinitions.kFoodMinimumThreshold &&
+          _matcher.matchesCueSetStrict(
+            normalized: normalized,
+            tokens: tokens,
+            cues: KeywordPlacementDefinitions.diningContextSupportOnlyKeywords,
+          );
+      final isDiningContext =
+          hasPrimaryDiningContextCue || hasSupportOnlyDiningContextCue;
+
+      if (isDiningContext) {
+        diningContextCueCount += 1;
+        diningContextCueStrength += label.confidence;
+        if (kDebugMode) {
+          debugPrint(
+            '[HIVE-DINING] label="${label.id}" '
+            'normalized="$normalized" tokens=$tokens '
+            'isDiningContext=$isDiningContext '
+            'diningContextCueCount=$diningContextCueCount '
+            'diningContextCueStrength=$diningContextCueStrength',
+          );
+        }
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.placeCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        placeCueCount += 1;
+        placeCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.strongPlaceCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        strongPlaceCueCount += 1;
+        strongPlaceCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.natureCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        natureCueCount += 1;
+        natureCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.vehicleCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        vehicleCueCount += 1;
+        vehicleCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.screenshotCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        screenshotCueCount += 1;
+        screenshotCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+            normalized: normalized,
+            tokens: tokens,
+            cues: KeywordPlacementDefinitions.screenDeviceCueKeywords,
+            matchPolicy: _strictKeywordMatchPolicy,
+          ) &&
+          !_devicesTechExcludedLabels.contains(normalized)) {
+        screenDeviceCueCount += 1;
+        screenDeviceCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.presentationCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        presentationCueCount += 1;
+        presentationCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.documentCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        documentCueCount += 1;
+        documentCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.identityDocumentCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        identityDocumentCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.documentCopyCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        documentCopyCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.receiptCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        receiptCueCount += 1;
+        receiptCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.chatUiCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        chatUiCueCount += 1;
+        chatUiCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSetStrict(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.strictChatUiCueKeywords,
+      )) {
+        strictChatUiCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.animationCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        animationCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.travelCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        travelCueCount += 1;
+        travelCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.travelContextCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        travelContextCueCount += 1;
+        travelContextCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.strongSportsCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        strongSportsCueCount += 1;
+        strongSportsCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.sportsContextCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        sportsContextCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.sportsGraphicCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        sportsGraphicCueCount += 1;
+        sportsGraphicCueStrength += label.confidence;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.weakSportsCueKeywords,
+        matchPolicy: _strictKeywordMatchPolicy,
+      )) {
+        weakSportsCueCount += 1;
+      }
+
+      if (_matcher.matchesCueSet(
+        normalized: normalized,
+        tokens: tokens,
+        cues: KeywordPlacementDefinitions.logoTextApparelCueKeywords,
+      )) {
+        logoTextApparelCueCount += 1;
+        logoTextApparelCueStrength += label.confidence;
+      }
+
+      if (tokens.contains('crowd') ||
+          tokens.contains('group') ||
+          normalized.contains('group photo')) {
+        crowdCueCount += 1;
+      }
+    }
+
+    return CueSummary(
+      familyCueCount: familyCueCount,
+      peopleCueCount: peopleCueCount,
+      directPetCueCount: directPetCueCount,
+      foodCueCount: foodCueCount,
+      strongFoodCueCount: strongFoodCueCount,
+      diningContextCueCount: diningContextCueCount,
+      placeCueCount: placeCueCount,
+      strongPlaceCueCount: strongPlaceCueCount,
+      natureCueCount: natureCueCount,
+      vehicleCueCount: vehicleCueCount,
+      screenshotCueCount: screenshotCueCount,
+      screenDeviceCueCount: screenDeviceCueCount,
+      presentationCueCount: presentationCueCount,
+      documentCueCount: documentCueCount,
+      identityDocumentCueCount: identityDocumentCueCount,
+      documentCopyCueCount: documentCopyCueCount,
+      receiptCueCount: receiptCueCount,
+      animationCueCount: animationCueCount,
+      crowdCueCount: crowdCueCount,
+      travelCueCount: travelCueCount,
+      travelContextCueCount: travelContextCueCount,
+      strongSportsCueCount: strongSportsCueCount,
+      weakSportsCueCount: weakSportsCueCount,
+      portraitCueCount: portraitCueCount,
+      groupPeopleCueCount: groupPeopleCueCount,
+      strongFamilyCueCount: strongFamilyCueCount,
+      sportsContextCueCount: sportsContextCueCount,
+      sportsGraphicCueCount: sportsGraphicCueCount,
+      chatUiCueCount: chatUiCueCount,
+      strictChatUiCueCount: strictChatUiCueCount,
+      logoTextApparelCueCount: logoTextApparelCueCount,
+      familyCueStrength: familyCueStrength,
+      peopleCueStrength: peopleCueStrength,
+      directPetCueStrength: directPetCueStrength,
+      foodCueStrength: foodCueStrength,
+      strongFoodCueStrength: strongFoodCueStrength,
+      diningContextCueStrength: diningContextCueStrength,
+      placeCueStrength: placeCueStrength,
+      strongPlaceCueStrength: strongPlaceCueStrength,
+      natureCueStrength: natureCueStrength,
+      vehicleCueStrength: vehicleCueStrength,
+      screenshotCueStrength: screenshotCueStrength,
+      screenDeviceCueStrength: screenDeviceCueStrength,
+      presentationCueStrength: presentationCueStrength,
+      documentCueStrength: documentCueStrength,
+      receiptCueStrength: receiptCueStrength,
+      chatUiCueStrength: chatUiCueStrength,
+      travelCueStrength: travelCueStrength,
+      travelContextCueStrength: travelContextCueStrength,
+      strongSportsCueStrength: strongSportsCueStrength,
+      sportsGraphicCueStrength: sportsGraphicCueStrength,
+      logoTextApparelCueStrength: logoTextApparelCueStrength,
+    );
+  }
+}
+
+class PlacementKeywordMatcher {
+  const PlacementKeywordMatcher();
+
+  KeywordMatchResult keywordMatch({
+    required String keyword,
+    required Set<String> tokens,
+    required String normalized,
+    KeywordMatchPolicy matchPolicy = _defaultKeywordMatchPolicy,
+  }) {
+    final normalizedKeyword = normalize(keyword);
+    if (normalized == normalizedKeyword) {
+      return const KeywordMatchResult(
+        score: 1.18,
+        type: KeywordMatchType.exactNormalized,
+      );
+    }
+
+    if (tokens.contains(normalizedKeyword)) {
+      return const KeywordMatchResult(
+        score: 1.0,
+        type: KeywordMatchType.exactToken,
+      );
+    }
+
+    final keywordTokens = tokenize(normalizedKeyword);
+    if (keywordTokens.isNotEmpty && keywordTokens.difference(tokens).isEmpty) {
+      return KeywordMatchResult(
+        score: matchPolicy.keywordTokenCoverageScore,
+        type: KeywordMatchType.keywordTokenCoverage,
+      );
+    }
+
+    final allowSubstringMatch =
+        normalized.contains(' ') ||
+        normalizedKeyword.contains(' ') ||
+        (normalized.length >= 7 && normalizedKeyword.length >= 7);
+
+    if (allowSubstringMatch &&
+        (normalized.contains(normalizedKeyword) ||
+            normalizedKeyword.contains(normalized))) {
+      return KeywordMatchResult(
+        score: matchPolicy.substringScore,
+        type: KeywordMatchType.substring,
+      );
+    }
+
+    if (keywordTokens.isEmpty) {
+      return KeywordMatchResult.none;
+    }
+
+    final overlap = tokens.intersection(keywordTokens).length;
+    if (overlap == 0) {
+      return KeywordMatchResult.none;
+    }
+
+    final coverage = overlap / keywordTokens.length;
+    if (coverage >= 0.5) {
+      return KeywordMatchResult(
+        score: matchPolicy.partialTokenOverlapScore,
+        type: KeywordMatchType.partialTokenOverlap,
+      );
+    }
+
+    return KeywordMatchResult(
+      score: matchPolicy.weakTokenOverlapScore,
+      type: KeywordMatchType.weakTokenOverlap,
+    );
+  }
+
+  bool matchesCueSet({
+    required String normalized,
+    required Set<String> tokens,
+    required Set<String> cues,
+    KeywordMatchPolicy matchPolicy = _defaultKeywordMatchPolicy,
+  }) {
+    for (final cue in cues) {
+      final match = keywordMatch(
+        keyword: cue,
+        tokens: tokens,
+        normalized: normalized,
+        matchPolicy: matchPolicy,
+      );
+      if (match.isPositive &&
+          (!match.isWeakFuzzy || matchPolicy.allowWeakFuzzyCueMatch)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool matchesCueSetStrict({
+    required String normalized,
+    required Set<String> tokens,
+    required Set<String> cues,
+  }) {
+    for (final cue in cues) {
+      final normalizedCue = normalize(cue);
+      if (normalized == normalizedCue) {
+        return true;
+      }
+
+      if (tokens.contains(normalizedCue)) {
+        return true;
+      }
+
+      final cueTokens = tokenize(normalizedCue);
+      if (cueTokens.isNotEmpty && cueTokens.difference(tokens).isEmpty) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  bool matchesFilenameCue({
+    required String normalizedFilename,
+    required Set<String> filenameTokens,
+    required Set<String> cues,
+    KeywordMatchPolicy matchPolicy = _defaultKeywordMatchPolicy,
+  }) {
+    if (normalizedFilename.isEmpty) {
+      return false;
+    }
+
+    for (final cue in cues) {
+      final match = keywordMatch(
+        keyword: cue,
+        tokens: filenameTokens,
+        normalized: normalizedFilename,
+        matchPolicy: matchPolicy,
+      );
+      if (match.isPositive &&
+          (!match.isWeakFuzzy || matchPolicy.allowWeakFuzzyCueMatch)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  String normalize(String value) {
+    final trimmed = value.toLowerCase().replaceAll(RegExp(r'[_:/-]+'), ' ');
+    return trimmed
+        .replaceAll(RegExp(r'[^a-z0-9 ]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  Set<String> tokenize(String value) {
+    if (value.isEmpty) {
+      return const <String>{};
+    }
+
+    return value.split(' ').where((token) => token.isNotEmpty).toSet();
+  }
+}
+
+enum KeywordMatchType {
+  none,
+  exactNormalized,
+  exactToken,
+  keywordTokenCoverage,
+  substring,
+  partialTokenOverlap,
+  weakTokenOverlap,
+}
+
+class KeywordMatchResult {
+  const KeywordMatchResult({required this.score, required this.type});
+
+  static const KeywordMatchResult none = KeywordMatchResult(
+    score: 0,
+    type: KeywordMatchType.none,
+  );
+
+  final double score;
+  final KeywordMatchType type;
+
+  bool get isPositive => score > 0;
+
+  bool get isStrongEvidence =>
+      type == KeywordMatchType.exactNormalized ||
+      type == KeywordMatchType.exactToken ||
+      type == KeywordMatchType.keywordTokenCoverage;
+
+  bool get isWeakFuzzy =>
+      type == KeywordMatchType.substring ||
+      type == KeywordMatchType.partialTokenOverlap ||
+      type == KeywordMatchType.weakTokenOverlap;
+}
+
+class KeywordMatchPolicy {
+  const KeywordMatchPolicy({
+    this.keywordTokenCoverageScore = 0.9,
+    this.substringScore = 0.96,
+    this.partialTokenOverlapScore = 0.62,
+    this.weakTokenOverlapScore = 0.38,
+    this.weakMatchContributionCap = double.infinity,
+    this.allowWeakFuzzyCueMatch = true,
+    this.allowWeakFuzzyPrimaryEvidence = true,
+  });
+
+  final double keywordTokenCoverageScore;
+  final double substringScore;
+  final double partialTokenOverlapScore;
+  final double weakTokenOverlapScore;
+  final double weakMatchContributionCap;
+  final bool allowWeakFuzzyCueMatch;
+  final bool allowWeakFuzzyPrimaryEvidence;
+}
+
+bool isNaturalPhoto(AssetAnalysis analysis, DerivedSignals derived) {
+  final structural = analysis.structural;
+
+  // StructuralSignals.isMemeOrPosterLike marks text-overlay graphics as non-natural.
+  final graphicHeavy =
+      structural.isMemeOrPosterLike || derived.graphicnessScore >= 0.50;
+  // StructuralSignals.isChatLike marks messaging UI as non-natural.
+  final uiHeavy = structural.isChatLike || derived.uiDensityScore >= 0.40;
+  // StructuralSignals.isDocumentLike marks receipts/IDs/scans as non-natural.
+  final documentHeavy = structural.isDocumentLike;
+
+  return !graphicHeavy && !uiHeavy && !documentHeavy;
+}
