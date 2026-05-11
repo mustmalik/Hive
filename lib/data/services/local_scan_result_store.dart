@@ -88,6 +88,7 @@ class StoredScanSnapshot {
     this.classifications = const <Map<String, dynamic>>[],
     this.overrides = const <Map<String, dynamic>>[],
     this.runs = const <Map<String, dynamic>>[],
+    this.audits = const <Map<String, dynamic>>[],
   });
 
   factory StoredScanSnapshot.fromJson(Map<String, dynamic> json) {
@@ -98,6 +99,7 @@ class StoredScanSnapshot {
       classifications: _readList(json['classifications']),
       overrides: _readList(json['overrides']),
       runs: _readList(json['runs']),
+      audits: _readList(json['audits']),
     );
   }
 
@@ -107,6 +109,7 @@ class StoredScanSnapshot {
   final List<Map<String, dynamic>> classifications;
   final List<Map<String, dynamic>> overrides;
   final List<Map<String, dynamic>> runs;
+  final List<Map<String, dynamic>> audits;
 
   Map<String, dynamic> toJson() {
     return {
@@ -116,6 +119,7 @@ class StoredScanSnapshot {
       'classifications': classifications,
       'overrides': overrides,
       'runs': runs,
+      'audits': audits,
     };
   }
 

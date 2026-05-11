@@ -1,16 +1,19 @@
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../application/models/asset_mapping_explanation.dart';
 import '../../application/models/asset_preview_data.dart';
+import '../../application/models/classification_backend.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/folder_detail_item.dart';
 import '../../application/models/hive_cell_category.dart';
+import '../../application/services/asset_reclassification_service.dart';
 import '../../application/services/asset_preview_service.dart';
 import '../../application/services/manual_recategorization_service.dart';
 import '../../application/services/thumbnail_service.dart';
+import '../../data/services/persisted_asset_reclassification_service.dart';
 import '../../data/services/persisted_manual_recategorization_service.dart';
 import '../../data/services/photo_manager_asset_preview_service.dart';
 import '../../data/services/photo_manager_thumbnail_service.dart';
@@ -27,7 +30,9 @@ class PhotoViewerScreen extends StatefulWidget {
     required this.originCellName,
     this.items,
     this.initialIndex = 0,
+    this.classificationBackend = ClassificationBackend.appleVision,
     this.manualRecategorizationService,
+    this.assetReclassificationService,
     this.thumbnailService,
     this.assetPreviewService,
   });
@@ -37,7 +42,9 @@ class PhotoViewerScreen extends StatefulWidget {
   final String originCellName;
   final List<FolderDetailItem>? items;
   final int initialIndex;
+  final ClassificationBackend classificationBackend;
   final ManualRecategorizationService? manualRecategorizationService;
+  final AssetReclassificationService? assetReclassificationService;
   final ThumbnailService? thumbnailService;
   final AssetPreviewService? assetPreviewService;
 
@@ -47,11 +54,13 @@ class PhotoViewerScreen extends StatefulWidget {
 
 class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   late final ManualRecategorizationService _manualRecategorizationService;
+  late final AssetReclassificationService _assetReclassificationService;
   late final ThumbnailService _thumbnailService;
   late final AssetPreviewService _assetPreviewService;
   late List<FolderDetailItem> _items;
   late int _currentIndex;
   bool _isApplyingMove = false;
+  bool _isReclassifying = false;
   bool _didMutateMembership = false;
 
   FolderDetailItem get _item => _items[_currentIndex];
@@ -69,12 +78,19 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
 
   bool get _canGoNext => _currentIndex < _items.length - 1;
 
+  bool get _isBusy => _isApplyingMove || _isReclassifying;
+
   @override
   void initState() {
     super.initState();
     _manualRecategorizationService =
         widget.manualRecategorizationService ??
         PersistedManualRecategorizationService.standard();
+    _assetReclassificationService =
+        widget.assetReclassificationService ??
+        PersistedAssetReclassificationService.standard(
+          classificationBackend: widget.classificationBackend,
+        );
     _thumbnailService =
         widget.thumbnailService ?? const PhotoManagerThumbnailService();
     _assetPreviewService =
@@ -116,6 +132,17 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     final theme = Theme.of(context);
     final explanation = _item.mappingExplanation;
     final classificationOutcome = _item.classificationOutcome;
+
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-DETAIL] asset=${_item.asset.id} '
+        'mappedCell=${explanation?.cellId ?? "none"} '
+        'source=${explanation == null ? "none" : explanation.isManualOverride ? "manual_override" : "pipeline"} '
+        'score=${explanation?.score.toStringAsFixed(2) ?? "n/a"} '
+        'top=${explanation?.topCandidateCellId ?? "n/a"} '
+        'runner=${explanation?.runnerUpCellId ?? "n/a"}',
+      );
+    }
 
     return showModalBottomSheet<void>(
       context: context,
@@ -179,6 +206,16 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                     _ExplanationRow(
                       label: 'Match Score',
                       value: explanation.score.toStringAsFixed(2),
+                    ),
+                    const SizedBox(height: 8),
+                    _FinalDecisionCard(
+                      explanation: explanation,
+                      fallbackReasonLabel: explanation.fallbackReason == null
+                          ? null
+                          : _fallbackReasonLabel(explanation.fallbackReason!),
+                      unsortedReasonLabel: explanation.unsortedReason == null
+                          ? null
+                          : _unsortedReasonLabel(explanation.unsortedReason!),
                     ),
                   ],
                   if (classificationOutcome != null) ...[
@@ -311,6 +348,10 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   }
 
   Future<void> _showMoveSheet() async {
+    if (_isBusy) {
+      return;
+    }
+
     final targetCells = _targetCells();
     final target = await showModalBottomSheet<HiveCellCategory>(
       context: context,
@@ -430,6 +471,67 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     }
   }
 
+  Future<void> _reclassifyCurrentAsset() async {
+    if (_isBusy) {
+      return;
+    }
+
+    setState(() {
+      _isReclassifying = true;
+    });
+
+    try {
+      final refreshedItem = await _assetReclassificationService.reclassifyAsset(
+        assetId: _item.asset.id,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      if (refreshedItem == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This asset is no longer available for reclassification.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      _replaceCurrentItem(refreshedItem);
+      setState(() {
+        _didMutateMembership = true;
+      });
+
+      final cellName =
+          refreshedItem.mappingExplanation?.cellName ?? widget.originCellName;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Re-classified locally. Current result: $cellName.'),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Re-classification could not finish for this asset right now.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isReclassifying = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -471,6 +573,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                         Text(
                           _isApplyingMove
                               ? 'Saving your local correction'
+                              : _isReclassifying
+                              ? 'Re-running on-device classification'
                               : _item.subtitle,
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: HiveColors.textSecondary,
@@ -479,7 +583,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                       ],
                     ),
                   ),
-                  if (_isApplyingMove)
+                  if (_isBusy)
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -636,6 +740,14 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 12),
+                            _QuickActionTile(
+                              title: 'Re-classify This Asset',
+                              subtitle:
+                                  'Delete the cached result and run local classification again.',
+                              icon: Icons.refresh_rounded,
+                              onTap: _reclassifyCurrentAsset,
+                            ),
                             const SizedBox(height: 18),
                             Container(
                               width: double.infinity,
@@ -749,6 +861,37 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
       'vision_request_creation' => 'Vision request creation failed',
       'vision_execution' => 'Vision execution failed',
       _ => value,
+    };
+  }
+
+  String _fallbackReasonLabel(UnsortedFallbackReason value) {
+    return switch (value) {
+      UnsortedFallbackReason.lowConfidenceHuman =>
+        'Low-confidence human evidence',
+      UnsortedFallbackReason.lowConfidenceFood =>
+        'Low-confidence food evidence',
+      UnsortedFallbackReason.lowConfidenceScene =>
+        'Low-confidence scene evidence',
+      UnsortedFallbackReason.lowConfidenceAnimal =>
+        'Low-confidence animal evidence',
+      UnsortedFallbackReason.lowConfidenceSports =>
+        'Low-confidence sports evidence',
+      UnsortedFallbackReason.lowConfidenceDocument =>
+        'Low-confidence document evidence',
+      UnsortedFallbackReason.ambiguousMulti => 'Ambiguous result',
+      UnsortedFallbackReason.noSignal => 'No usable signal',
+    };
+  }
+
+  String _unsortedReasonLabel(UnsortedReason value) {
+    return switch (value) {
+      UnsortedReason.lowConfidenceHuman =>
+        'Human evidence was too weak to commit',
+      UnsortedReason.lowConfidenceFood =>
+        'Food evidence was too weak to commit',
+      UnsortedReason.lowConfidenceScene => 'Scene evidence was too generic',
+      UnsortedReason.ambiguousMulti => 'Top categories were too close',
+      UnsortedReason.noSignal => 'No strong classification signal',
     };
   }
 }
@@ -1280,6 +1423,7 @@ class _ExplanationRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
             child: Text(
@@ -1289,7 +1433,120 @@ class _ExplanationRow extends StatelessWidget {
               ),
             ),
           ),
-          Text(value, style: theme.textTheme.bodyMedium),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FinalDecisionCard extends StatelessWidget {
+  const _FinalDecisionCard({
+    required this.explanation,
+    required this.fallbackReasonLabel,
+    required this.unsortedReasonLabel,
+  });
+
+  final AssetMappingExplanation explanation;
+  final String? fallbackReasonLabel;
+  final String? unsortedReasonLabel;
+
+  String _formatScore(double? value) => value!.toStringAsFixed(2);
+
+  String _yesNo(bool? value) => value == true ? 'Yes' : 'No';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final rows = <Widget>[
+      _ExplanationRow(
+        label: 'Final Result',
+        value: explanation.usedFallback ? 'Unsorted' : explanation.cellName,
+      ),
+      if (fallbackReasonLabel != null)
+        _ExplanationRow(label: 'Fallback Reason', value: fallbackReasonLabel!),
+      if (unsortedReasonLabel != null)
+        _ExplanationRow(label: 'Unsorted Reason', value: unsortedReasonLabel!),
+      if (explanation.topCandidateCellName case final topName?)
+        _ExplanationRow(
+          label: 'Top Candidate',
+          value: explanation.topCandidateScore == null
+              ? topName
+              : '$topName (${_formatScore(explanation.topCandidateScore)})',
+        ),
+      if (explanation.runnerUpCellName case final runnerName?)
+        _ExplanationRow(
+          label: 'Runner-up',
+          value: explanation.runnerUpScore == null
+              ? runnerName
+              : '$runnerName (${_formatScore(explanation.runnerUpScore)})',
+        ),
+      if (explanation.winningMargin != null)
+        _ExplanationRow(
+          label: 'Winning Margin',
+          value: _formatScore(explanation.winningMargin),
+        ),
+      if (explanation.requiredMargin != null)
+        _ExplanationRow(
+          label: 'Required Margin',
+          value: _formatScore(explanation.requiredMargin),
+        ),
+      if (explanation.fallbackThreshold != null)
+        _ExplanationRow(
+          label: 'Confidence Threshold',
+          value: _formatScore(explanation.fallbackThreshold),
+        ),
+      if (explanation.blockedByMargin != null)
+        _ExplanationRow(
+          label: 'Blocked by Margin',
+          value: _yesNo(explanation.blockedByMargin),
+        ),
+      if (explanation.blockedByLowConfidence != null)
+        _ExplanationRow(
+          label: 'Blocked by Low Confidence',
+          value: _yesNo(explanation.blockedByLowConfidence),
+        ),
+    ];
+
+    if (rows.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+      decoration: BoxDecoration(
+        color: HiveColors.surface.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            explanation.usedFallback ? 'Why It Was Unsorted' : 'Final Decision',
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: HiveColors.honey,
+            ),
+          ),
+          if (explanation.finalDecisionSummary case final summary?) ...[
+            const SizedBox(height: 10),
+            Text(
+              summary,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: HiveColors.textSecondary,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          ...rows,
         ],
       ),
     );

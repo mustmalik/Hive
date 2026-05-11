@@ -1,3 +1,5 @@
+import '../../application/models/asset_mapping_explanation.dart';
+import '../../application/models/placement_audit_entry.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/scan_scope.dart';
 import '../../domain/entities/classification_label.dart';
@@ -16,6 +18,7 @@ StoredScanSnapshot copyStoredScanSnapshot(
   List<Map<String, dynamic>>? classifications,
   List<Map<String, dynamic>>? overrides,
   List<Map<String, dynamic>>? runs,
+  List<Map<String, dynamic>>? audits,
 }) {
   return StoredScanSnapshot(
     settings: settings ?? snapshot.settings,
@@ -24,6 +27,64 @@ StoredScanSnapshot copyStoredScanSnapshot(
     classifications: classifications ?? snapshot.classifications,
     overrides: overrides ?? snapshot.overrides,
     runs: runs ?? snapshot.runs,
+    audits: audits ?? snapshot.audits,
+  );
+}
+
+Map<String, dynamic> placementAuditEntryToJson(PlacementAuditEntry entry) {
+  return {
+    'assetId': entry.assetId,
+    'finalCell': entry.finalCell,
+    'routeLayer': entry.routeLayer,
+    'topScores': entry.topScores,
+    'firedVetoes': entry.firedVetoes,
+    'firedGates': entry.firedGates,
+    'unsortedReason': entry.unsortedReason?.name,
+    'isNaturalPhoto': entry.isNaturalPhoto,
+    'humanPresenceScore': entry.humanPresenceScore,
+    'animalPresenceScore': entry.animalPresenceScore,
+    'graphicnessScore': entry.graphicnessScore,
+    'documentnessScore': entry.documentnessScore,
+    'sceneDensityScore': entry.sceneDensityScore,
+    'timestamp': entry.timestamp.toIso8601String(),
+  };
+}
+
+PlacementAuditEntry placementAuditEntryFromJson(Map<String, dynamic> json) {
+  final topScoresRaw = json['topScores'];
+  final topScores = <String, double>{};
+  if (topScoresRaw is Map) {
+    for (final entry in topScoresRaw.entries) {
+      if (entry.key is String && entry.value is num) {
+        topScores[entry.key as String] = (entry.value as num).toDouble();
+      }
+    }
+  }
+
+  final unsortedReasonName = json['unsortedReason'] as String?;
+  return PlacementAuditEntry(
+    assetId: json['assetId'] as String? ?? '',
+    finalCell: json['finalCell'] as String? ?? 'unsorted',
+    routeLayer: json['routeLayer'] as String? ?? 'Layer6_Unsorted',
+    topScores: Map<String, double>.unmodifiable(topScores),
+    firedVetoes: (json['firedVetoes'] as List<dynamic>? ?? const <dynamic>[])
+        .whereType<String>()
+        .toList(growable: false),
+    firedGates: (json['firedGates'] as List<dynamic>? ?? const <dynamic>[])
+        .whereType<String>()
+        .toList(growable: false),
+    unsortedReason: unsortedReasonName == null
+        ? null
+        : UnsortedReason.values.byName(unsortedReasonName),
+    isNaturalPhoto: json['isNaturalPhoto'] as bool? ?? false,
+    humanPresenceScore: (json['humanPresenceScore'] as num?)?.toDouble() ?? 0,
+    animalPresenceScore: (json['animalPresenceScore'] as num?)?.toDouble() ?? 0,
+    graphicnessScore: (json['graphicnessScore'] as num?)?.toDouble() ?? 0,
+    documentnessScore: (json['documentnessScore'] as num?)?.toDouble() ?? 0,
+    sceneDensityScore: (json['sceneDensityScore'] as num?)?.toDouble() ?? 0,
+    timestamp:
+        DateTime.tryParse(json['timestamp'] as String? ?? '') ??
+        DateTime.fromMillisecondsSinceEpoch(0),
   );
 }
 

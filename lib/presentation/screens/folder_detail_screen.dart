@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/folder_detail_item.dart';
 import '../../application/models/folder_detail_snapshot.dart';
@@ -20,6 +21,7 @@ class FolderDetailScreen extends StatefulWidget {
     super.key,
     required this.cellId,
     required this.cellName,
+    this.classificationBackend = ClassificationBackend.appleVision,
     this.folderDetailService,
     this.manualRecategorizationService,
     this.thumbnailService,
@@ -28,6 +30,7 @@ class FolderDetailScreen extends StatefulWidget {
 
   final String cellId;
   final String cellName;
+  final ClassificationBackend classificationBackend;
   final FolderDetailService? folderDetailService;
   final ManualRecategorizationService? manualRecategorizationService;
   final ThumbnailService? thumbnailService;
@@ -82,6 +85,7 @@ class _FolderDetailScreenState extends State<FolderDetailScreen> {
           initialIndex: initialIndex,
           originCellId: widget.cellId,
           originCellName: widget.cellName,
+          classificationBackend: widget.classificationBackend,
           manualRecategorizationService: _manualRecategorizationService,
           thumbnailService: _thumbnailService,
           assetPreviewService: _assetPreviewService,

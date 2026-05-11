@@ -6,6 +6,8 @@ abstract interface class ClassificationRepository {
 
   Future<void> saveOutcomes(Iterable<ClassificationOutcome> outcomes);
 
+  Future<void> deleteOutcomeForAsset(String assetId);
+
   Future<Map<String, ClassificationOutcome>> getOutcomesForAssetIds(
     List<String> assetIds,
   );

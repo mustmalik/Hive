@@ -40,6 +40,11 @@ class InMemoryClassificationRepository implements ClassificationRepository {
   }
 
   @override
+  Future<void> deleteOutcomeForAsset(String assetId) async {
+    _outcomesByAssetId.remove(assetId);
+  }
+
+  @override
   Future<Map<String, ClassificationOutcome>> getOutcomesForAssetIds(
     List<String> assetIds,
   ) async {

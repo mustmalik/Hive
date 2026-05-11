@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/services/permission_service.dart';
 import '../../application/services/settings_service.dart';
 import '../../data/services/local_settings_service.dart';
@@ -13,10 +14,12 @@ class OnboardingScreen extends StatefulWidget {
     super.key,
     this.permissionService,
     this.settingsService,
+    this.classificationBackend = ClassificationBackend.appleVision,
   });
 
   final PermissionService? permissionService;
   final SettingsService? settingsService;
+  final ClassificationBackend classificationBackend;
 
   @override
   State<OnboardingScreen> createState() => _OnboardingScreenState();
@@ -73,6 +76,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         builder: (_) => PermissionScreen(
           permissionService: widget.permissionService,
           settingsService: settingsService,
+          classificationBackend: widget.classificationBackend,
         ),
       ),
     );

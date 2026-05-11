@@ -86,10 +86,17 @@ const List<HiveCellCategory> hiveTopLevelCategories = [
     featured: true,
   ),
   HiveCellCategory(
-    id: 'animation_cartoon_meme',
-    name: 'Animation / Cartoon / Meme',
-    description: 'Stylized art, saved jokes, and internet moments',
+    id: 'animation',
+    name: 'Animation',
+    description: 'Anime, manga, cartoons, comics, and stylized art',
     styleKey: 'animation',
+    featured: true,
+  ),
+  HiveCellCategory(
+    id: 'memes',
+    name: 'Memes',
+    description: 'Jokes, edits, overlays, and internet commentary',
+    styleKey: 'memes',
     featured: true,
   ),
   HiveCellCategory(

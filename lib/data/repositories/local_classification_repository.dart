@@ -22,6 +22,19 @@ class LocalClassificationRepository implements ClassificationRepository {
   }
 
   @override
+  Future<void> deleteOutcomeForAsset(String assetId) async {
+    final snapshot = await _store.read();
+    await _store.write(
+      copyStoredScanSnapshot(
+        snapshot,
+        classifications: snapshot.classifications
+            .where((entry) => entry['assetId'] != assetId)
+            .toList(growable: false),
+      ),
+    );
+  }
+
+  @override
   Future<Map<String, ClassificationOutcome>> getOutcomesForAssetIds(
     List<String> assetIds,
   ) async {

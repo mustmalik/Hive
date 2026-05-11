@@ -1,0 +1,124 @@
+diff --git a/lib/application/models/structural_signals.dart b/lib/application/models/structural_signals.dart
+new file mode 100644
+index 0000000..7b41e2a
+--- /dev/null
++++ b/lib/application/models/structural_signals.dart
+@@ -0,0 +1,118 @@
++class StructuralSignals {
++  const StructuralSignals({
++    required this.faceCount,
++    required this.largestFaceAreaRatio,
++    required this.hasSingleLargeFace,
++    required this.textCoverageRatio,
++    required this.fullOcrText,
++    required this.lineCount,
++    required this.blockCount,
++    required this.hasChatLikeLayout,
++    required this.hasTableLikeLayout,
++    required this.barcodeCount,
++    required this.hasQrCode,
++    required this.hasMrzPattern,
++  });
++
++  final int faceCount;
++  final double largestFaceAreaRatio;
++  final bool hasSingleLargeFace;
++  final double textCoverageRatio;
++  final String fullOcrText;
++  final int lineCount;
++  final int blockCount;
++  final bool hasChatLikeLayout;
++  final bool hasTableLikeLayout;
++  final int barcodeCount;
++  final bool hasQrCode;
++  final bool hasMrzPattern;
++
++  factory StructuralSignals.empty() {
++    return const StructuralSignals(
++      faceCount: 0,
++      largestFaceAreaRatio: 0,
++      hasSingleLargeFace: false,
++      textCoverageRatio: 0,
++      fullOcrText: '',
++      lineCount: 0,
++      blockCount: 0,
++      hasChatLikeLayout: false,
++      hasTableLikeLayout: false,
++      barcodeCount: 0,
++      hasQrCode: false,
++      hasMrzPattern: false,
++    );
++  }
++
++  bool hasAnyToken(List<String> tokens) {
++    final normalizedText = fullOcrText.toLowerCase();
++    for (final token in tokens) {
++      if (normalizedText.contains(token.toLowerCase())) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  bool get isDocumentLike {
++    return textCoverageRatio >= 0.15 ||
++        hasTableLikeLayout ||
++        barcodeCount >= 1 ||
++        hasMrzPattern;
++  }
++
++  bool get isChatLike {
++    return hasChatLikeLayout && textCoverageRatio >= 0.05;
++  }
++
++  bool get _hasTwitterOrSocialOcrPattern {
++    return hasAnyToken(const [
++      'rt',
++      'retweet',
++      'like',
++      'reply',
++      'share',
++      'follow',
++      'following',
++      'followers',
++      'tweet',
++      'posted',
++      'instagram',
++      'tiktok',
++      'facebook',
++      'linkedin',
++      'comment',
++      'comments',
++      'likes',
++      'views',
++      'watch',
++    ]);
++  }
++
++  bool get isTextOverlayOnPhoto {
++    return faceCount >= 1 &&
++        textCoverageRatio >= 0.15 &&
++        !hasMrzPattern &&
++        !hasChatLikeLayout &&
++        !hasTableLikeLayout;
++  }
++
++  bool get isTextHeavyGraphic {
++    return textCoverageRatio >= 0.18 &&
++        lineCount >= 3 &&
++        faceCount == 0 &&
++        !hasMrzPattern &&
++        !hasTableLikeLayout;
++  }
++
++  bool get isTweetOrSocialCapture {
++    return textCoverageRatio >= 0.10 &&
++        lineCount >= 4 &&
++        hasChatLikeLayout == false &&
++        _hasTwitterOrSocialOcrPattern;
++  }
++
++  bool get isMemeOrPosterLike {
++    return isTextOverlayOnPhoto || isTextHeavyGraphic || isTweetOrSocialCapture;
++  }
++}

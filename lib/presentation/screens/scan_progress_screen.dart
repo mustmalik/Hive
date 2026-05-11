@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/models/scan_scope.dart';
 import '../../application/services/scan_coordinator.dart';
 import '../../data/services/real_scan_coordinator.dart';
@@ -16,10 +17,12 @@ class ScanProgressScreen extends StatefulWidget {
     super.key,
     this.scanCoordinator,
     this.scanScope = const ScanScope.allPhotos(),
+    this.classificationBackend = ClassificationBackend.appleVision,
   });
 
   final ScanCoordinator? scanCoordinator;
   final ScanScope scanScope;
+  final ClassificationBackend classificationBackend;
 
   @override
   State<ScanProgressScreen> createState() => _ScanProgressScreenState();
@@ -34,7 +37,11 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
   @override
   void initState() {
     super.initState();
-    _scanCoordinator = widget.scanCoordinator ?? RealScanCoordinator.seeded();
+    _scanCoordinator =
+        widget.scanCoordinator ??
+        RealScanCoordinator.seeded(
+          classificationBackend: widget.classificationBackend,
+        );
     _subscription = _scanCoordinator.watchActiveRun().listen((run) {
       if (!mounted) {
         return;
@@ -143,6 +150,7 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
     final statusTitle = _statusTitle(run);
     final headline = _headline(run);
     final supportingCopy = _supportingCopy(run);
+    final scopeResultLabel = _scopeResultLabel(run);
 
     return PopScope(
       canPop: false,
@@ -255,7 +263,7 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          'Scope • ${widget.scanScope.label}',
+                          scopeResultLabel,
                           style: theme.textTheme.labelLarge?.copyWith(
                             color: HiveColors.textSecondary,
                           ),
@@ -323,7 +331,7 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
                   ] else ...[
                     _CompletionSummaryCard(
                       run: run,
-                      scopeLabel: widget.scanScope.label,
+                      scopeLabel: scopeResultLabel,
                     ),
                     const SizedBox(height: 18),
                     _CompletionActionsCard(
@@ -399,6 +407,18 @@ class _ScanProgressScreenState extends State<ScanProgressScreen> {
         'HIVE kept everything local-only and non-destructive. You can retry this scope or change scope for a lighter pass.',
       ScanRunStatus.queued || ScanRunStatus.running =>
         'HIVE is reading local photo metadata and shaping placeholder cells without moving or renaming anything in Apple Photos.',
+    };
+  }
+
+  String _scopeResultLabel(ScanRun? run) {
+    final assetCount = run?.discoveredAssetCount ?? 0;
+    final assetLabel = assetCount == 1 ? '1 asset' : '$assetCount assets';
+
+    return switch (widget.scanScope.kind) {
+      ScanScopeKind.album =>
+        'Album: ${widget.scanScope.albumTitle ?? widget.scanScope.label} — $assetLabel',
+      ScanScopeKind.limitedPhotos => 'Limited library — $assetLabel',
+      ScanScopeKind.allPhotos => 'Full library — $assetLabel',
     };
   }
 }
@@ -766,7 +786,14 @@ class _SummaryRow extends StatelessWidget {
               ),
             ),
           ),
-          Text(value, style: theme.textTheme.bodyMedium),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
         ],
       ),
     );

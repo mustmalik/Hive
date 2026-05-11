@@ -13,6 +13,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
   static const PermissionRequestOption _requestOption = PermissionRequestOption(
     iosAccessLevel: IosAccessLevel.readWrite,
   );
+  static const int _photoScreenshotSubtype = 1 << 2;
 
   static const FilterOption _assetFilterOption = FilterOption(needTitle: true);
   final void Function(String message)? debugLog;
@@ -52,7 +53,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
   }
 
   @override
-  Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
+  Future<List<PhotoAlbum>> fetchAlbums({int limit = 24}) async {
     if (!await _hasLibraryAccess()) {
       return const [];
     }
@@ -63,35 +64,43 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
       filterOption: _buildFilter(),
     );
 
-    final albums = <MediaAlbum>[];
+    final albums = <({PhotoAlbum album, int index})>[];
 
-    for (final path in paths) {
+    for (var index = 0; index < paths.length; index += 1) {
+      final path = paths[index];
       final refreshed = await _refreshPath(path, filter: _buildFilter());
       if (refreshed == null) {
         continue;
       }
 
       final assetCount = await _resolvePathAssetCount(refreshed);
-      if (assetCount <= 0) {
-        continue;
-      }
-
-      albums.add(
-        MediaAlbum(
-          id: refreshed.id,
-          name: refreshed.name,
-          assetCount: assetCount,
-          isAll: refreshed.isAll,
-          isFolder: refreshed.albumType != 1,
-        ),
-      );
-
-      if (albums.length >= limit) {
-        break;
-      }
+      albums.add((
+        album: _mapPhotoAlbum(refreshed, assetCount: assetCount),
+        index: index,
+      ));
     }
 
-    return albums;
+    albums.sort(_compareAlbumEntries);
+    final resolved = albums
+        .take(limit < 0 ? 0 : limit)
+        .map((entry) => entry.album)
+        .toList(growable: false);
+
+    _log('[HIVE-ALBUM] discovered albums=${resolved.length}');
+    for (final album in resolved) {
+      _log(
+        '[HIVE-ALBUM] title="${album.title}" id=${album.id} '
+        'assetCount=${album.assetCount} smart=${album.isSmartAlbum}',
+      );
+    }
+
+    return resolved;
+  }
+
+  @override
+  Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
+    final albums = await fetchAlbums(limit: limit);
+    return albums.map(MediaAlbum.fromPhotoAlbum).toList(growable: false);
   }
 
   @override
@@ -148,7 +157,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     final path = await _resolveScopedPath(scope: scope, filter: filter);
     if (path == null) {
       _log(
-        'fetch scope=${scope.kind.name} path=selected_album unresolved '
+        '[HIVE-SCAN] fetch scope=${scope.logName} path=selected_album unresolved '
         'albumId=${scope.albumId ?? 'missing'} page=$page pageSize=$pageSize',
       );
       return const [];
@@ -157,14 +166,14 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     final leafAlbums = await _resolveLeafAlbums(path, filter: filter);
     if (leafAlbums.isEmpty) {
       _log(
-        'fetch scope=${scope.kind.name} path=selected_album empty '
+        '[HIVE-SCAN] fetch scope=${scope.logName} path=selected_album empty '
         'albumId=${path.id} albumName="${path.name}" page=$page pageSize=$pageSize',
       );
       return const [];
     }
 
     _log(
-      'fetch scope=${scope.kind.name} path=selected_album '
+      '[HIVE-SCAN] fetch scope=${scope.logName} path=selected_album '
       'albumId=${path.id} albumName="${path.name}" '
       'isFolder=${scope.isFolder} leafAlbums=${leafAlbums.length} '
       'page=$page pageSize=$pageSize',
@@ -183,7 +192,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     required int pageSize,
   }) {
     _log(
-      'fetch scope=${ScanScopeKind.allPhotos.name} path=global_library '
+      '[HIVE-SCAN] fetch scope=full_library path=global_library '
       'page=$page pageSize=$pageSize',
     );
     return PhotoManager.getAssetListPaged(
@@ -202,14 +211,14 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     final limitedPath = await _resolveLimitedScopePath(filter: filter);
     if (limitedPath == null) {
       _log(
-        'fetch scope=${ScanScopeKind.limitedPhotos.name} '
+        '[HIVE-SCAN] fetch scope=limited_library '
         'path=limited_root unavailable page=$page pageSize=$pageSize',
       );
       return const [];
     }
 
     _log(
-      'fetch scope=${ScanScopeKind.limitedPhotos.name} path=limited_root '
+      '[HIVE-SCAN] fetch scope=limited_library path=limited_root '
       'albumId=${limitedPath.id} albumName="${limitedPath.name}" '
       'page=$page pageSize=$pageSize',
     );
@@ -217,7 +226,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
   }
 
   Future<int> _getAllAssetCount({required FilterOptionGroup filter}) async {
-    _log('count scope=${ScanScopeKind.allPhotos.name} path=global_library');
+    _log('[HIVE-SCAN] count scope=full_library path=global_library');
     return PhotoManager.getAssetCount(
       type: RequestType.common,
       filterOption: filter,
@@ -228,14 +237,14 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     final limitedPath = await _resolveLimitedScopePath(filter: filter);
     if (limitedPath == null) {
       _log(
-        'count scope=${ScanScopeKind.limitedPhotos.name} '
+        '[HIVE-SCAN] count scope=limited_library '
         'path=limited_root unavailable',
       );
       return 0;
     }
 
     _log(
-      'count scope=${ScanScopeKind.limitedPhotos.name} path=limited_root '
+      '[HIVE-SCAN] count scope=limited_library path=limited_root '
       'albumId=${limitedPath.id} albumName="${limitedPath.name}"',
     );
     return _resolvePathAssetCount(limitedPath);
@@ -248,7 +257,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     final path = await _resolveScopedPath(scope: scope, filter: filter);
     if (path == null) {
       _log(
-        'count scope=${scope.kind.name} path=selected_album unresolved '
+        '[HIVE-SCAN] count scope=${scope.logName} path=selected_album unresolved '
         'albumId=${scope.albumId ?? 'missing'}',
       );
       return 0;
@@ -256,7 +265,7 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
 
     final count = await _resolvePathAssetCount(path);
     _log(
-      'count scope=${scope.kind.name} path=selected_album '
+      '[HIVE-SCAN] count scope=${scope.logName} path=selected_album '
       'albumId=${path.id} albumName="${path.name}" '
       'isFolder=${scope.isFolder} assetCount=$count',
     );
@@ -396,6 +405,56 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
     return totalCount;
   }
 
+  int _compareAlbumEntries(
+    ({PhotoAlbum album, int index}) left,
+    ({PhotoAlbum album, int index}) right,
+  ) {
+    final leftHasAssets = left.album.assetCount > 0;
+    final rightHasAssets = right.album.assetCount > 0;
+    if (leftHasAssets != rightHasAssets) {
+      return leftHasAssets ? -1 : 1;
+    }
+
+    final titleCompare = left.album.title.toLowerCase().compareTo(
+      right.album.title.toLowerCase(),
+    );
+    if (titleCompare != 0) {
+      return titleCompare;
+    }
+
+    final idCompare = left.album.id.compareTo(right.album.id);
+    if (idCompare != 0) {
+      return idCompare;
+    }
+
+    return left.index.compareTo(right.index);
+  }
+
+  PhotoAlbum _mapPhotoAlbum(AssetPathEntity path, {required int assetCount}) {
+    final darwinType = path.albumTypeEx?.darwin?.type;
+    final darwinSubtype = path.albumTypeEx?.darwin?.subtype;
+    final isFolder = path.albumType != 1;
+    final isSmartAlbum =
+        darwinType == PMDarwinAssetCollectionType.smartAlbum ||
+        (darwinSubtype?.name.startsWith('smartAlbum') ?? false);
+    final isUserAlbum =
+        !path.isAll &&
+        !isFolder &&
+        !isSmartAlbum &&
+        (darwinType == null || darwinType == PMDarwinAssetCollectionType.album);
+
+    return PhotoAlbum(
+      id: path.id,
+      title: path.name,
+      assetCount: assetCount,
+      isSmartAlbum: isSmartAlbum,
+      isUserAlbum: isUserAlbum,
+      subtype: darwinSubtype?.name,
+      isAll: path.isAll,
+      isFolder: isFolder,
+    );
+  }
+
   Future<bool> _hasLibraryAccess() async {
     final state = await PhotoManager.getPermissionState(
       requestOption: _requestOption,
@@ -439,6 +498,10 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
   }
 
   MediaAssetType _mapType(AssetEntity entity) {
+    if (_hasScreenshotSubtype(entity)) {
+      return MediaAssetType.screenshot;
+    }
+
     if (entity.isLivePhoto) {
       return MediaAssetType.livePhoto;
     }
@@ -448,6 +511,11 @@ class PhotoManagerMediaLibraryService implements MediaLibraryService {
       AssetType.video => MediaAssetType.video,
       AssetType.audio || AssetType.other => MediaAssetType.other,
     };
+  }
+
+  bool _hasScreenshotSubtype(AssetEntity entity) {
+    return entity.type == AssetType.image &&
+        (entity.subtype & _photoScreenshotSubtype) == _photoScreenshotSubtype;
   }
 
   DateTime _resolveCreatedAt(AssetEntity entity) {

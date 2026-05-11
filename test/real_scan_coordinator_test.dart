@@ -9,6 +9,7 @@ import 'package:hive_flutter_v1/application/models/media_album.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_folder_cell_repository.dart';
 import 'package:hive_flutter_v1/data/repositories/in_memory_media_asset_repository.dart';
+import 'package:hive_flutter_v1/data/repositories/in_memory_placement_audit_repository.dart';
 import 'package:hive_flutter_v1/application/services/classification_service.dart';
 import 'package:hive_flutter_v1/application/services/folder_mapping_service.dart';
 import 'package:hive_flutter_v1/application/services/media_library_service.dart';
@@ -41,6 +42,7 @@ void main() {
           seedAssets: const [],
         ),
         folderCellRepository: folderCellRepository,
+        placementAuditRepository: InMemoryPlacementAuditRepository(),
         scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
         pageSize: 2,
         now: () => DateTime(2026, 4, 18, 12),
@@ -120,6 +122,7 @@ void main() {
       manualOverrideRepository: manualOverrideRepository,
       mediaAssetRepository: InMemoryMediaAssetRepository(seedAssets: const []),
       folderCellRepository: folderCellRepository,
+      placementAuditRepository: InMemoryPlacementAuditRepository(),
       scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
       pageSize: 3,
       now: () => DateTime(2026, 4, 18, 12),
@@ -196,6 +199,7 @@ void main() {
         manualOverrideRepository: InMemoryManualOverrideRepository(),
         mediaAssetRepository: InMemoryMediaAssetRepository(seedAssets: [asset]),
         folderCellRepository: InMemoryFolderCellRepository(seedCells: const []),
+        placementAuditRepository: InMemoryPlacementAuditRepository(),
         scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
         pageSize: 1,
         now: () => DateTime(2026, 4, 18, 12),
@@ -237,6 +241,7 @@ void main() {
           seedAssets: const [],
         ),
         folderCellRepository: InMemoryFolderCellRepository(seedCells: const []),
+        placementAuditRepository: InMemoryPlacementAuditRepository(),
         scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
         pageSize: 2,
         now: () => DateTime(2026, 4, 18, 12),
@@ -281,6 +286,7 @@ void main() {
           seedAssets: const [],
         ),
         folderCellRepository: folderCellRepository,
+        placementAuditRepository: InMemoryPlacementAuditRepository(),
         scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
         pageSize: 4,
         now: () => DateTime(2026, 4, 18, 12),
@@ -311,6 +317,85 @@ void main() {
       expect(petsCell?.assetIds, ['asset_1']);
     },
   );
+
+  test(
+    'RealScanCoordinator passes selected album assets as normal scan inputs',
+    () async {
+      final albumAssets = [
+        _FakeMediaLibraryService._assets[0],
+        _FakeMediaLibraryService._assets[2],
+      ];
+      final mediaLibraryService = _ScopeAwareMediaLibraryService(
+        allAssets: _FakeMediaLibraryService._assets,
+        limitedAssets: _FakeMediaLibraryService._assets.take(2).toList(),
+        albumAssetsById: {'album_trip': albumAssets},
+      );
+      final folderMappingService = _CountingFolderMappingService(
+        KeywordFolderMappingService(now: () => DateTime(2026, 4, 18)),
+      );
+      final coordinator = RealScanCoordinator(
+        mediaLibraryService: mediaLibraryService,
+        classificationService: _FakeClassificationService(),
+        folderMappingService: folderMappingService,
+        classificationRepository: InMemoryClassificationRepository(),
+        manualOverrideRepository: InMemoryManualOverrideRepository(),
+        mediaAssetRepository: InMemoryMediaAssetRepository(
+          seedAssets: const [],
+        ),
+        folderCellRepository: InMemoryFolderCellRepository(seedCells: const []),
+        placementAuditRepository: InMemoryPlacementAuditRepository(),
+        scanRunRepository: InMemoryScanRunRepository(seedRuns: const []),
+        pageSize: 4,
+        now: () => DateTime(2026, 4, 18, 12),
+      );
+
+      final completed = Completer<ScanRun>();
+      final subscription = coordinator.watchActiveRun().listen((run) {
+        if (run.isTerminal && !completed.isCompleted) {
+          completed.complete(run);
+        }
+      });
+      addTearDown(subscription.cancel);
+
+      await coordinator.startFullScan(
+        scope: const ScanScope.album(
+          albumId: 'album_trip',
+          albumTitle: 'Trip Debug Album',
+        ),
+      );
+      final run = await completed.future.timeout(const Duration(seconds: 3));
+
+      expect(run.status, ScanRunStatus.completed);
+      expect(run.discoveredAssetCount, 2);
+      expect(run.classifiedAssetCount, 2);
+      expect(mediaLibraryService.countScopes, [ScanScopeKind.album]);
+      expect(
+        mediaLibraryService.fetchScopes,
+        everyElement(ScanScopeKind.album),
+      );
+      expect(folderMappingService.lastBuildAssetIds, ['asset_1', 'asset_3']);
+    },
+  );
+
+  test('resolveAssetsForScope resolves only selected album assets', () async {
+    final albumAssets = [
+      _FakeMediaLibraryService._assets[1],
+      _FakeMediaLibraryService._assets[2],
+    ];
+    final mediaLibraryService = _ScopeAwareMediaLibraryService(
+      allAssets: _FakeMediaLibraryService._assets,
+      limitedAssets: _FakeMediaLibraryService._assets.take(1).toList(),
+      albumAssetsById: {'album_debug': albumAssets},
+    );
+
+    final resolved = await mediaLibraryService.resolveAssetsForScope(
+      const ScanScope.album(albumId: 'album_debug', albumTitle: 'Debug Album'),
+      pageSize: 1,
+    );
+
+    expect(resolved.map((asset) => asset.id), ['asset_2', 'asset_3']);
+    expect(mediaLibraryService.fetchScopes, everyElement(ScanScopeKind.album));
+  });
 }
 
 class _FakeMediaLibraryService implements MediaLibraryService {
@@ -372,6 +457,11 @@ class _FakeMediaLibraryService implements MediaLibraryService {
     }
 
     return null;
+  }
+
+  @override
+  Future<List<PhotoAlbum>> fetchAlbums({int limit = 24}) async {
+    return getAvailableAlbums(limit: limit);
   }
 
   @override
@@ -460,6 +550,7 @@ class _CountingFolderMappingService implements FolderMappingService {
   final FolderMappingService _delegate;
   int buildSuggestedCellsCallCount = 0;
   int explainPlacementCallCount = 0;
+  List<String> lastBuildAssetIds = const [];
 
   @override
   Future<List<FolderCell>> buildSuggestedCells({
@@ -468,6 +559,7 @@ class _CountingFolderMappingService implements FolderMappingService {
     List<ManualOverride> overrides = const [],
   }) {
     buildSuggestedCellsCallCount += 1;
+    lastBuildAssetIds = assets.map((asset) => asset.id).toList(growable: false);
     return _delegate.buildSuggestedCells(
       assets: assets,
       labelsByAssetId: labelsByAssetId,
@@ -519,6 +611,11 @@ class _ConfigurableMediaLibraryService implements MediaLibraryService {
   }
 
   @override
+  Future<List<PhotoAlbum>> fetchAlbums({int limit = 24}) async {
+    return getAvailableAlbums(limit: limit);
+  }
+
+  @override
   Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
     return const [];
   }
@@ -533,11 +630,14 @@ class _ScopeAwareMediaLibraryService implements MediaLibraryService {
   _ScopeAwareMediaLibraryService({
     required List<MediaAsset> allAssets,
     required List<MediaAsset> limitedAssets,
+    Map<String, List<MediaAsset>> albumAssetsById = const {},
   }) : _allAssets = allAssets,
-       _limitedAssets = limitedAssets;
+       _limitedAssets = limitedAssets,
+       _albumAssetsById = albumAssetsById;
 
   final List<MediaAsset> _allAssets;
   final List<MediaAsset> _limitedAssets;
+  final Map<String, List<MediaAsset>> _albumAssetsById;
   final List<ScanScopeKind> fetchScopes = [];
   final List<ScanScopeKind> countScopes = [];
 
@@ -549,9 +649,11 @@ class _ScopeAwareMediaLibraryService implements MediaLibraryService {
     ScanScope scope = const ScanScope.allPhotos(),
   }) async {
     fetchScopes.add(scope.kind);
-    final source = scope.kind == ScanScopeKind.limitedPhotos
-        ? _limitedAssets
-        : _allAssets;
+    final source = switch (scope.kind) {
+      ScanScopeKind.allPhotos => _allAssets,
+      ScanScopeKind.limitedPhotos => _limitedAssets,
+      ScanScopeKind.album => _albumAssetsById[scope.albumId] ?? const [],
+    };
     final start = page * pageSize;
     if (start >= source.length) {
       return const [];
@@ -565,7 +667,11 @@ class _ScopeAwareMediaLibraryService implements MediaLibraryService {
 
   @override
   Future<MediaAsset?> getAssetById(String assetId) async {
-    for (final asset in [..._allAssets, ..._limitedAssets]) {
+    for (final asset in [
+      ..._allAssets,
+      ..._limitedAssets,
+      for (final assets in _albumAssetsById.values) ...assets,
+    ]) {
       if (asset.id == assetId) {
         return asset;
       }
@@ -574,8 +680,22 @@ class _ScopeAwareMediaLibraryService implements MediaLibraryService {
   }
 
   @override
+  Future<List<PhotoAlbum>> fetchAlbums({int limit = 24}) async {
+    return getAvailableAlbums(limit: limit);
+  }
+
+  @override
   Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
-    return const [];
+    return _albumAssetsById.entries
+        .map(
+          (entry) => MediaAlbum(
+            id: entry.key,
+            name: entry.key,
+            assetCount: entry.value.length,
+          ),
+        )
+        .take(limit)
+        .toList(growable: false);
   }
 
   @override
@@ -583,8 +703,10 @@ class _ScopeAwareMediaLibraryService implements MediaLibraryService {
     ScanScope scope = const ScanScope.allPhotos(),
   }) async {
     countScopes.add(scope.kind);
-    return scope.kind == ScanScopeKind.limitedPhotos
-        ? _limitedAssets.length
-        : _allAssets.length;
+    return switch (scope.kind) {
+      ScanScopeKind.allPhotos => _allAssets.length,
+      ScanScopeKind.limitedPhotos => _limitedAssets.length,
+      ScanScopeKind.album => _albumAssetsById[scope.albumId]?.length ?? 0,
+    };
   }
 }

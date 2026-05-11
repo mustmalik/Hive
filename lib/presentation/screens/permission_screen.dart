@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/services/permission_service.dart';
 import '../../application/services/settings_service.dart';
 import '../../data/services/local_settings_service.dart';
@@ -14,10 +15,12 @@ class PermissionScreen extends StatefulWidget {
     super.key,
     this.permissionService,
     this.settingsService,
+    this.classificationBackend = ClassificationBackend.appleVision,
   });
 
   final PermissionService? permissionService;
   final SettingsService? settingsService;
+  final ClassificationBackend classificationBackend;
 
   @override
   State<PermissionScreen> createState() => _PermissionScreenState();
@@ -102,7 +105,10 @@ class _PermissionScreenState extends State<PermissionScreen>
   Future<void> _continueToHome() async {
     await Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
-        builder: (_) => HomeScreen(settingsService: _settingsService),
+        builder: (_) => HomeScreen(
+          settingsService: _settingsService,
+          classificationBackend: widget.classificationBackend,
+        ),
       ),
     );
   }

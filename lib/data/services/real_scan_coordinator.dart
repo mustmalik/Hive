@@ -1,16 +1,21 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
+import '../../application/models/classification_backend.dart';
 import '../../application/models/classification_outcome.dart';
 import '../../application/models/scan_scope.dart';
 import '../../application/repositories/classification_repository.dart';
 import '../../application/repositories/folder_cell_repository.dart';
 import '../../application/repositories/manual_override_repository.dart';
 import '../../application/repositories/media_asset_repository.dart';
+import '../../application/repositories/placement_audit_repository.dart';
 import '../../application/repositories/scan_run_repository.dart';
 import '../../application/services/classification_service.dart';
 import '../../application/services/folder_mapping_service.dart';
 import '../../application/services/media_library_service.dart';
 import '../../application/services/scan_coordinator.dart';
+import '../../application/models/placement_audit_entry.dart';
 import '../../domain/entities/classification_label.dart';
 import '../../domain/entities/folder_cell.dart';
 import '../../domain/entities/manual_override.dart';
@@ -20,11 +25,13 @@ import '../repositories/local_classification_repository.dart';
 import '../repositories/local_folder_cell_repository.dart';
 import '../repositories/local_manual_override_repository.dart';
 import '../repositories/local_media_asset_repository.dart';
+import '../repositories/local_placement_audit_repository.dart';
 import '../repositories/local_scan_run_repository.dart';
-import 'ios_vision_classification_service.dart';
+import 'classification_service_factory.dart';
 import 'keyword_folder_mapping_service.dart';
 import 'local_scan_result_store.dart';
 import 'photo_manager_media_library_service.dart';
+import 'result_pipeline_debug.dart';
 
 class RealScanCoordinator implements ScanCoordinator {
   RealScanCoordinator({
@@ -35,6 +42,7 @@ class RealScanCoordinator implements ScanCoordinator {
     required ManualOverrideRepository manualOverrideRepository,
     required MediaAssetRepository mediaAssetRepository,
     required FolderCellRepository folderCellRepository,
+    required PlacementAuditRepository placementAuditRepository,
     required ScanRunRepository scanRunRepository,
     int pageSize = 24,
     DateTime Function()? now,
@@ -45,6 +53,7 @@ class RealScanCoordinator implements ScanCoordinator {
        _manualOverrideRepository = manualOverrideRepository,
        _mediaAssetRepository = mediaAssetRepository,
        _folderCellRepository = folderCellRepository,
+       _placementAuditRepository = placementAuditRepository,
        _scanRunRepository = scanRunRepository,
        _pageSize = pageSize,
        _now = now ?? DateTime.now;
@@ -56,6 +65,7 @@ class RealScanCoordinator implements ScanCoordinator {
   final ManualOverrideRepository _manualOverrideRepository;
   final MediaAssetRepository _mediaAssetRepository;
   final FolderCellRepository _folderCellRepository;
+  final PlacementAuditRepository _placementAuditRepository;
   final ScanRunRepository _scanRunRepository;
   final int _pageSize;
   final DateTime Function() _now;
@@ -74,6 +84,8 @@ class RealScanCoordinator implements ScanCoordinator {
     'devices_tech': 'Devices / Tech',
     'documents_receipts': 'Documents / Receipts',
     'sports': 'Sports',
+    'animation': 'Animation',
+    'memes': 'Memes',
     'animation_cartoon_meme': 'Animation / Cartoon / Meme',
     'unsorted': 'Unsorted',
   };
@@ -82,17 +94,23 @@ class RealScanCoordinator implements ScanCoordinator {
   Future<void>? _activeTask;
   bool _cancelRequested = false;
 
-  factory RealScanCoordinator.seeded() {
+  factory RealScanCoordinator.seeded({
+    ClassificationBackend classificationBackend =
+        ClassificationBackend.appleVision,
+  }) {
     final store = LocalScanResultStore();
 
     return RealScanCoordinator(
       mediaLibraryService: const PhotoManagerMediaLibraryService(),
-      classificationService: IosVisionClassificationService(),
+      classificationService: ClassificationServiceFactory.create(
+        backend: classificationBackend,
+      ),
       folderMappingService: KeywordFolderMappingService(),
       classificationRepository: LocalClassificationRepository(store: store),
       manualOverrideRepository: LocalManualOverrideRepository(store: store),
       mediaAssetRepository: LocalMediaAssetRepository(store: store),
       folderCellRepository: LocalFolderCellRepository(store: store),
+      placementAuditRepository: LocalPlacementAuditRepository(store: store),
       scanRunRepository: LocalScanRunRepository(store: store),
     );
   }
@@ -123,6 +141,7 @@ class RealScanCoordinator implements ScanCoordinator {
     }
 
     final now = _now();
+    _debugScanLog(_formatScopeLog(scope));
     final totalAssets = await _resolveTotalAssets(scope: scope);
     final queuedRun = ScanRun(
       id: 'scan_${now.millisecondsSinceEpoch}',
@@ -167,12 +186,18 @@ class RealScanCoordinator implements ScanCoordinator {
         cell.id: cell.name,
     };
     final seenCellIds = <String>{};
+    final progressPlacementsByAssetId = <String, String>{};
     var processedCount = 0;
     var page = 0;
     var latestDetectedCellName = startingRun.latestDetectedCellName;
     var generatedCellCount = 0;
 
     try {
+      debugResultsLog(
+        'scan ${startingRun.id} start totalHint='
+        '${startingRun.discoveredAssetCount}',
+      );
+
       while (!_cancelRequested) {
         final batch = await _mediaLibraryService.fetchAssets(
           page: page,
@@ -184,12 +209,21 @@ class RealScanCoordinator implements ScanCoordinator {
           break;
         }
 
+        debugResultsLog(
+          'scan ${startingRun.id} ingested page=$page count=${batch.length} '
+          'assetIds=${debugIdSet(batch.map((asset) => asset.id))}',
+        );
+        _debugScanLog(
+          'resolvedAssets=${batch.length} scope=${scope.logName} page=$page',
+        );
+
         for (final asset in batch) {
           if (_cancelRequested) {
             break;
           }
 
           processedAssets.add(asset);
+          final structuralWarmup = _primeStructuralSignals(asset);
           final currentItemTitle = _resolveCurrentItemTitle(
             asset,
             ordinal: processedCount + 1,
@@ -205,17 +239,34 @@ class RealScanCoordinator implements ScanCoordinator {
           final labels = outcome.labels;
           labelsByAssetId[asset.id] = labels;
           outcomesByAssetId[asset.id] = outcome;
+          debugResultsLog(
+            'scan ${startingRun.id} classified asset=${asset.id} '
+            'status=${outcome.status.name} labelCount=${labels.length}',
+          );
+          await structuralWarmup;
           final placement = _resolvePlacementForProgress(
             asset: asset,
             labels: labels,
             override: includeOverridesByAssetId[asset.id],
             knownCellNamesById: knownCellNamesById,
           );
+          progressPlacementsByAssetId[asset.id] = placement.cellId;
+          if (kDebugMode) {
+            debugPrint(
+              '[HIVE-PASS-COMPARE] asset=${asset.id} pass=scan '
+              'finalCell=${placement.cellId} '
+              'topLabels=${labels.take(6).map((l) => "${l.displayName}:${l.confidence.toStringAsFixed(2)}").join(", ")}',
+            );
+          }
 
           processedCount += 1;
           seenCellIds.add(placement.cellId);
           generatedCellCount = seenCellIds.length;
           latestDetectedCellName = placement.cellName;
+          debugResultsLog(
+            'scan ${startingRun.id} progress provisional asset=${asset.id} '
+            'cell=${placement.cellId}',
+          );
 
           final stageLabel = _resolveStageLabel(
             processedCount: processedCount,
@@ -270,11 +321,54 @@ class RealScanCoordinator implements ScanCoordinator {
         labelsByAssetId: labelsByAssetId,
         overrides: manualOverrides,
       );
+      final groupedIds = uniqueAssetIdsInCells(finalCells);
+      final scannedIds = processedAssets.map((asset) => asset.id).toSet();
+      final classifiedIds = outcomesByAssetId.keys.toSet();
+      final missingFromGroups = missingIds(
+        expected: scannedIds,
+        actual: groupedIds,
+      );
+      debugResultsLog(
+        'scan ${startingRun.id} final assembly scanned=${scannedIds.length} '
+        'classified=${classifiedIds.length} placedProgress='
+        '${progressPlacementsByAssetId.length} grouped=${groupedIds.length} '
+        'cells=${finalCells.length} groupedByCell=${debugFolderCells(finalCells)}',
+      );
+      if (missingFromGroups.isNotEmpty) {
+        debugResultsLog(
+          'scan ${startingRun.id} missing after final assembly='
+          '${debugIdSet(missingFromGroups)} progressPlacements='
+          '$progressPlacementsByAssetId',
+        );
+      }
 
       await _persistResults(
         assets: processedAssets,
         cells: finalCells,
         outcomesByAssetId: outcomesByAssetId,
+      );
+
+      final finalCellByAssetId = <String, String>{
+        for (final cell in finalCells)
+          for (final assetId in cell.assetIds) assetId: cell.id,
+      };
+      for (final asset in processedAssets) {
+        final scanCell = progressPlacementsByAssetId[asset.id];
+        final mappingCell = finalCellByAssetId[asset.id];
+        if (kDebugMode && scanCell != null && mappingCell != null) {
+          debugPrint(
+            '[HIVE-PASS-COMPARE] asset=${asset.id} pass=mapping '
+            'finalCell=$mappingCell topLabels=${(labelsByAssetId[asset.id] ?? const []).take(6).map((l) => "${l.displayName}:${l.confidence.toStringAsFixed(2)}").join(", ")}',
+          );
+          if (scanCell != mappingCell) {
+            debugPrint(
+              '[HIVE-PASS-MISMATCH] asset=${asset.id} scanCell=$scanCell mappingCell=$mappingCell reason="derived signal mismatch"',
+            );
+          }
+        }
+      }
+      _debugScanLog(
+        'resolvedAssets=${processedAssets.length} scope=${scope.logName}',
       );
 
       await _emitRun(
@@ -319,9 +413,62 @@ class RealScanCoordinator implements ScanCoordinator {
     required List<FolderCell> cells,
     required Map<String, ClassificationOutcome> outcomesByAssetId,
   }) async {
+    final finalCellByAssetId = <String, String>{
+      for (final cell in cells)
+        for (final assetId in cell.assetIds) assetId: cell.id,
+    };
+    debugResultsLog(
+      'persist start scanned=${assets.length} classified='
+      '${outcomesByAssetId.length} grouped=${uniqueAssetIdsInCells(cells).length} '
+      'cells=${cells.length} assetIds=${debugIdSet(assets.map((asset) => asset.id))} '
+      'groupedByCell=${debugFolderCells(cells)}',
+    );
     await _classificationRepository.saveOutcomes(outcomesByAssetId.values);
     await _mediaAssetRepository.replaceAll(assets);
     await _folderCellRepository.replaceAll(cells);
+    final timestamp = _now();
+    for (final asset in assets) {
+      final cellId = finalCellByAssetId[asset.id] ?? 'unsorted';
+      await _placementAuditRepository.saveEntry(
+        PlacementAuditEntry(
+          assetId: asset.id,
+          finalCell: cellId,
+          routeLayer: 'final_persist',
+          topScores: const {},
+          firedVetoes: const [],
+          firedGates: const [],
+          isNaturalPhoto: false,
+          humanPresenceScore: 0,
+          animalPresenceScore: 0,
+          graphicnessScore: 0,
+          documentnessScore: 0,
+          sceneDensityScore: 0,
+          timestamp: timestamp,
+        ),
+      );
+      debugResultsLog(
+        'final persisted asset=${asset.id} cell=$cellId',
+      );
+    }
+    final reloadedAssets = await _mediaAssetRepository.getAllAssets();
+    final reloadedCells = await _folderCellRepository.getAllCells();
+    final reloadedAssetIds = reloadedAssets.map((asset) => asset.id).toSet();
+    final reloadedGroupedIds = uniqueAssetIdsInCells(reloadedCells);
+    final missingAfterReload = missingIds(
+      expected: assets.map((asset) => asset.id),
+      actual: reloadedGroupedIds,
+    );
+    debugResultsLog(
+      'persist reload assets=${reloadedAssetIds.length} '
+      'cells=${reloadedCells.length} grouped=${reloadedGroupedIds.length} '
+      'assetIds=${debugIdSet(reloadedAssetIds)} '
+      'groupedByCell=${debugFolderCells(reloadedCells)}',
+    );
+    if (missingAfterReload.isNotEmpty) {
+      debugResultsLog(
+        'persist reload missing=${debugIdSet(missingAfterReload)}',
+      );
+    }
   }
 
   Future<ClassificationOutcome> _classifySafely(MediaAsset asset) async {
@@ -337,6 +484,14 @@ class RealScanCoordinator implements ScanCoordinator {
         classificationRan: false,
         imagePreparationSucceeded: false,
         noLabelsReturned: false,
+      );
+    }
+
+    if (kDebugMode) {
+      debugPrint(
+        '[HIVE-ENGINE] Using '
+        '${ClassificationServiceFactory.engineNameForService(_classificationService)} '
+        'for labeling — mediaId=${asset.id}',
       );
     }
 
@@ -361,6 +516,23 @@ class RealScanCoordinator implements ScanCoordinator {
     return asset.type == MediaAssetType.image ||
         asset.type == MediaAssetType.livePhoto ||
         asset.type == MediaAssetType.screenshot;
+  }
+
+  Future<void> _primeStructuralSignals(MediaAsset asset) async {
+    if (!_isClassifiable(asset)) {
+      return;
+    }
+
+    final folderMappingService = _folderMappingService;
+    if (folderMappingService is! KeywordFolderMappingService) {
+      return;
+    }
+
+    try {
+      await folderMappingService.primeStructuralSignals(asset: asset);
+    } catch (_) {
+      return;
+    }
   }
 
   Map<String, ManualOverride> _resolveIncludeOverrides(
@@ -455,6 +627,23 @@ class RealScanCoordinator implements ScanCoordinator {
     } catch (_) {
       return 0;
     }
+  }
+
+  void _debugScanLog(String message) {
+    if (!kDebugMode) {
+      return;
+    }
+
+    debugPrint('[HIVE-SCAN] $message');
+  }
+
+  String _formatScopeLog(ScanScope scope) {
+    if (!scope.isAlbumSelection) {
+      return 'scope=${scope.logName}';
+    }
+
+    return 'scope=album albumId=${scope.albumId} '
+        'albumTitle="${scope.albumTitle ?? scope.label}"';
   }
 
   String _resolveCurrentItemTitle(MediaAsset asset, {required int ordinal}) {

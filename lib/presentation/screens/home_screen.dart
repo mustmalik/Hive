@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/models/media_album.dart';
 import '../../application/models/scan_scope.dart';
 import '../../application/services/asset_preview_service.dart';
@@ -36,6 +37,7 @@ class HomeScreen extends StatefulWidget {
     this.createThumbnailService,
     this.createAssetPreviewService,
     this.settingsService,
+    this.classificationBackend = ClassificationBackend.appleVision,
   });
 
   final HomeDashboardService? homeDashboardService;
@@ -47,6 +49,7 @@ class HomeScreen extends StatefulWidget {
   final ThumbnailService Function()? createThumbnailService;
   final AssetPreviewService Function()? createAssetPreviewService;
   final SettingsService? settingsService;
+  final ClassificationBackend classificationBackend;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -57,8 +60,16 @@ class _HomeScreenState extends State<HomeScreen> {
   late final MediaLibraryService _mediaLibraryService;
   late final SettingsService _settingsService;
   late Future<HomeDashboardSnapshot> _dashboardFuture;
+  ScanScope _selectedScanScope = const ScanScope.fullLibrary();
   ScanScope? _rememberedScope;
+  PhotoAlbum? _selectedAlbum;
+  List<PhotoAlbum> _availableAlbums = const [];
   bool _isLoadingRememberedScope = true;
+  bool _isAlbumScopeMode = false;
+  bool _isLoadingAlbums = false;
+  bool _isStartingScan = false;
+  String? _albumsError;
+  String? _scopeMessage;
 
   @override
   void initState() {
@@ -79,38 +90,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadRememberedScope() async {
     final settings = await _settingsService.loadSettings();
-    final resolved = await _resolveRememberedScope(settings.lastUsedScanScope);
     if (!mounted) {
       return;
     }
 
     setState(() {
-      _rememberedScope = resolved;
+      _rememberedScope = settings.lastUsedScanScope;
       _isLoadingRememberedScope = false;
     });
-  }
-
-  Future<ScanScope?> _resolveRememberedScope(ScanScope? scope) async {
-    if (scope == null) {
-      return null;
-    }
-
-    if (!scope.isAlbumSelection) {
-      return scope;
-    }
-
-    final albums = await _mediaLibraryService.getAvailableAlbums(limit: 200);
-    for (final album in albums) {
-      if (album.id == scope.albumId) {
-        return ScanScope.album(
-          albumId: album.id,
-          albumName: album.name,
-          isFolder: album.isFolder,
-        );
-      }
-    }
-
-    return null;
   }
 
   Future<void> _rememberScope(ScanScope scope) async {
@@ -139,7 +126,9 @@ class _HomeScreenState extends State<HomeScreen> {
           scanScope: scope,
           scanCoordinator:
               widget.createScanCoordinator?.call() ??
-              RealScanCoordinator.seeded(),
+              RealScanCoordinator.seeded(
+                classificationBackend: widget.classificationBackend,
+              ),
         ),
       ),
     );
@@ -157,29 +146,112 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _startPreferredScan() async {
-    if (_isLoadingRememberedScope) {
+  Future<void> _startSelectedScan() async {
+    if (_isStartingScan) {
       return;
     }
 
-    final remembered = await _resolveRememberedScope(_rememberedScope);
-    if (!mounted) {
-      return;
-    }
-
-    if (remembered != null) {
+    final blockedReason = _scanBlockReason();
+    if (blockedReason != null) {
       setState(() {
-        _rememberedScope = remembered;
+        _scopeMessage = blockedReason;
       });
-      await _openScanProgress(remembered);
       return;
     }
 
-    await _chooseScanScope();
+    final scope = _selectedScanScope;
+    if (scope.isAlbumSelection) {
+      setState(() {
+        _isStartingScan = true;
+        _scopeMessage = null;
+      });
+
+      final count = await _resolveSelectedAlbumCount(scope);
+      if (!mounted) {
+        return;
+      }
+
+      if (count <= 0) {
+        setState(() {
+          _isStartingScan = false;
+          _scopeMessage = 'This album appears to be empty.';
+        });
+        return;
+      }
+
+      setState(() {
+        _isStartingScan = false;
+      });
+    }
+
+    await _openScanProgress(scope);
   }
 
   Future<void> _chooseScanScope() async {
-    final scope = await showModalBottomSheet<ScanScope>(
+    final action = await showModalBottomSheet<_ScopePickerAction>(
+      context: context,
+      backgroundColor: HiveColors.surfaceElevated,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
+      builder: (context) {
+        return const _ScopeModeSheet();
+      },
+    );
+
+    if (!mounted || action == null) {
+      return;
+    }
+
+    switch (action) {
+      case _ScopePickerAction.fullLibrary:
+        _selectFullLibraryScope();
+      case _ScopePickerAction.album:
+        await _selectAlbumScope();
+    }
+  }
+
+  void _selectFullLibraryScope() {
+    setState(() {
+      _selectedScanScope = const ScanScope.fullLibrary();
+      _selectedAlbum = null;
+      _isAlbumScopeMode = false;
+      _scopeMessage = null;
+      _albumsError = null;
+    });
+  }
+
+  Future<void> _selectAlbumScope() async {
+    setState(() {
+      _isAlbumScopeMode = true;
+      _scopeMessage = null;
+    });
+
+    await _showAlbumPicker();
+  }
+
+  void _selectRememberedScope() {
+    final rememberedScope = _rememberedScope;
+    if (rememberedScope == null) {
+      return;
+    }
+
+    setState(() {
+      _selectedScanScope = rememberedScope;
+      _isAlbumScopeMode = rememberedScope.isAlbumSelection;
+      _selectedAlbum = null;
+      _scopeMessage = null;
+      _albumsError = null;
+    });
+  }
+
+  Future<void> _showAlbumPicker() async {
+    final loaded = await _ensureAlbumsLoaded();
+    if (!mounted || !loaded) {
+      return;
+    }
+
+    final selectedAlbum = await showModalBottomSheet<PhotoAlbum>(
       context: context,
       backgroundColor: HiveColors.surfaceElevated,
       isScrollControlled: true,
@@ -187,18 +259,101 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
       ),
       builder: (context) {
-        return _ScanScopeSheet(
-          mediaLibraryService: _mediaLibraryService,
-          rememberedScope: _rememberedScope,
+        return _AlbumPickerSheet(
+          albums: _availableAlbums,
+          selectedAlbumId: _selectedAlbum?.id ?? _selectedScanScope.albumId,
         );
       },
     );
 
-    if (!mounted || scope == null) {
+    if (!mounted || selectedAlbum == null) {
+      if (_selectedScanScope.isAlbumSelection) {
+        return;
+      }
+
+      setState(() {
+        _scopeMessage = 'Select an album first.';
+      });
       return;
     }
 
-    await _openScanProgress(scope);
+    _applyAlbumSelection(selectedAlbum);
+  }
+
+  Future<bool> _ensureAlbumsLoaded() async {
+    if (_availableAlbums.isNotEmpty) {
+      return true;
+    }
+
+    setState(() {
+      _isLoadingAlbums = true;
+      _albumsError = null;
+    });
+
+    try {
+      final albums = await _mediaLibraryService.fetchAlbums(limit: 200);
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        _availableAlbums = albums;
+        _isLoadingAlbums = false;
+      });
+      return true;
+    } catch (_) {
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        _isLoadingAlbums = false;
+        _albumsError = 'Unable to load albums right now.';
+        _scopeMessage = _albumsError;
+      });
+      return false;
+    }
+  }
+
+  void _applyAlbumSelection(PhotoAlbum album) {
+    setState(() {
+      _selectedAlbum = album;
+      _isAlbumScopeMode = true;
+      _selectedScanScope = ScanScope.album(
+        albumId: album.id,
+        albumTitle: album.title,
+        isFolder: album.isFolder,
+      );
+      _scopeMessage = album.assetCount <= 0
+          ? 'This album appears to be empty.'
+          : null;
+      _albumsError = null;
+    });
+  }
+
+  String? _scanBlockReason() {
+    if (!_isAlbumScopeMode) {
+      return null;
+    }
+
+    if (!_selectedScanScope.isAlbumSelection) {
+      return 'Select an album first.';
+    }
+
+    final selectedAlbum = _selectedAlbum;
+    if (selectedAlbum != null && selectedAlbum.assetCount <= 0) {
+      return 'This album appears to be empty.';
+    }
+
+    return null;
+  }
+
+  Future<int> _resolveSelectedAlbumCount(ScanScope scope) async {
+    try {
+      return _mediaLibraryService.getEstimatedAssetCount(scope: scope);
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<void> _openFolderDetail(
@@ -210,6 +365,7 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (_) => FolderDetailScreen(
           cellId: dashboard.visibleCells[index].id,
           cellName: dashboard.visibleCells[index].name,
+          classificationBackend: widget.classificationBackend,
           folderDetailService:
               widget.createFolderDetailService?.call() ??
               PersistedFolderDetailService.standard(),
@@ -370,14 +526,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               Expanded(
                                 child: ElevatedButton.icon(
-                                  onPressed: _isLoadingRememberedScope
+                                  onPressed: _isStartingScan
                                       ? null
-                                      : _startPreferredScan,
+                                      : _startSelectedScan,
                                   icon: const Icon(Icons.hive_outlined),
                                   label: Text(
-                                    _rememberedScope == null
-                                        ? 'Start Scan'
-                                        : 'Use Last Scan Scope',
+                                    _isStartingScan
+                                        ? 'Checking Scope'
+                                        : 'Start Scan',
                                   ),
                                 ),
                               ),
@@ -403,12 +559,24 @@ class _HomeScreenState extends State<HomeScreen> {
                             ],
                           ),
                           const SizedBox(height: 14),
+                          _ScanScopeControl(
+                            selectedScope: _selectedScanScope,
+                            selectedAlbum: _selectedAlbum,
+                            isAlbumScopeMode: _isAlbumScopeMode,
+                            isLoadingAlbums: _isLoadingAlbums,
+                            message: _scopeMessage,
+                            error: _albumsError,
+                            onSelectFullLibrary: _selectFullLibraryScope,
+                            onSelectAlbum: _selectAlbumScope,
+                            onChangeAlbum: _showAlbumPicker,
+                          ),
+                          const SizedBox(height: 14),
                           _RememberedScopeBanner(
                             rememberedScope: _rememberedScope,
                             isLoading: _isLoadingRememberedScope,
                             onUseLast: _rememberedScope == null
                                 ? null
-                                : () => _openScanProgress(_rememberedScope!),
+                                : _selectRememberedScope,
                             onChange: _chooseScanScope,
                           ),
                         ],
@@ -472,12 +640,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         title: 'Your first HIVE scan starts here',
                         description:
                             'Run one local-only pass to turn your accessible library into smart virtual cells without moving a single original asset.',
-                        actionLabel: _rememberedScope == null
-                            ? 'Start Your First Scan'
-                            : 'Use Last Scan Scope',
-                        onAction: _isLoadingRememberedScope
-                            ? null
-                            : _startPreferredScan,
+                        actionLabel: 'Start Your First Scan',
+                        onAction: _startSelectedScan,
                         secondaryLabel: 'Choose Scope',
                         onSecondary: _chooseScanScope,
                         icon: Icons.hive_outlined,
@@ -488,12 +652,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             'This scan finished, but the cells need a stronger pass',
                         description:
                             'Try a tighter scope, rerun the same slice, or use manual corrections to sharpen the next result.',
-                        actionLabel: _rememberedScope == null
-                            ? 'Rescan'
-                            : 'Use Last Scan Scope',
-                        onAction: _isLoadingRememberedScope
-                            ? null
-                            : _startPreferredScan,
+                        actionLabel: 'Rescan',
+                        onAction: _startSelectedScan,
                         secondaryLabel: 'Change Scope',
                         onSecondary: _chooseScanScope,
                         icon: Icons.auto_awesome_mosaic_rounded,
@@ -648,14 +808,157 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class _ScanScopeSheet extends StatelessWidget {
-  const _ScanScopeSheet({
-    required this.mediaLibraryService,
-    this.rememberedScope,
+enum _ScopePickerAction { fullLibrary, album }
+
+class _ScanScopeControl extends StatelessWidget {
+  const _ScanScopeControl({
+    required this.selectedScope,
+    required this.selectedAlbum,
+    required this.isAlbumScopeMode,
+    required this.isLoadingAlbums,
+    required this.onSelectFullLibrary,
+    required this.onSelectAlbum,
+    required this.onChangeAlbum,
+    this.message,
+    this.error,
   });
 
-  final MediaLibraryService mediaLibraryService;
-  final ScanScope? rememberedScope;
+  final ScanScope selectedScope;
+  final PhotoAlbum? selectedAlbum;
+  final bool isAlbumScopeMode;
+  final bool isLoadingAlbums;
+  final String? message;
+  final String? error;
+  final VoidCallback onSelectFullLibrary;
+  final VoidCallback onSelectAlbum;
+  final VoidCallback onChangeAlbum;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selectedAlbum = this.selectedAlbum;
+    final hasSelectedAlbum = isAlbumScopeMode && selectedScope.isAlbumSelection;
+    final statusLabel = !isAlbumScopeMode
+        ? 'Scope: Full library'
+        : hasSelectedAlbum
+        ? selectedAlbum == null
+              ? 'Scope: ${selectedScope.albumTitle ?? selectedScope.label}'
+              : 'Scope: ${selectedAlbum.title} (${selectedAlbum.assetCount})'
+        : 'Scope: Select an album first';
+    final helperMessage = error ?? message;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: HiveColors.surface.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: HiveColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Scan scope',
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: HiveColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _ScopeToggleButton(
+                  title: 'Full library',
+                  selected: !isAlbumScopeMode,
+                  onTap: onSelectFullLibrary,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _ScopeToggleButton(
+                  title: 'By album',
+                  selected: isAlbumScopeMode,
+                  onTap: onSelectAlbum,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            statusLabel,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: hasSelectedAlbum || !isAlbumScopeMode
+                  ? HiveColors.textPrimary
+                  : HiveColors.textSecondary,
+            ),
+          ),
+          if (isLoadingAlbums) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Loading albums…',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: HiveColors.textSecondary,
+              ),
+            ),
+          ],
+          if (helperMessage != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              helperMessage,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: error == null ? HiveColors.textSecondary : Colors.red,
+              ),
+            ),
+          ],
+          if (hasSelectedAlbum) ...[
+            const SizedBox(height: 6),
+            TextButton(
+              onPressed: onChangeAlbum,
+              child: const Text('Change album'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ScopeToggleButton extends StatelessWidget {
+  const _ScopeToggleButton({
+    required this.title,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String title;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(
+        selected ? Icons.check_circle_rounded : Icons.circle_outlined,
+        size: 18,
+      ),
+      label: Text(title),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: selected ? HiveColors.honey : HiveColors.textPrimary,
+        side: BorderSide(
+          color: selected ? HiveColors.honey : HiveColors.outline,
+        ),
+        textStyle: theme.textTheme.labelLarge,
+      ),
+    );
+  }
+}
+
+class _ScopeModeSheet extends StatelessWidget {
+  const _ScopeModeSheet();
 
   @override
   Widget build(BuildContext context) {
@@ -665,116 +968,212 @@ class _ScanScopeSheet extends StatelessWidget {
       top: false,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-        child: FutureBuilder<List<MediaAlbum>>(
-          future: mediaLibraryService.getAvailableAlbums(),
-          builder: (context, snapshot) {
-            final albums = snapshot.data ?? const <MediaAlbum>[];
-
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 42,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: HiveColors.outline,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: HiveColors.outline,
+                  borderRadius: BorderRadius.circular(999),
                 ),
-                const SizedBox(height: 18),
-                Text('Choose Scan Scope', style: theme.textTheme.headlineSmall),
-                const SizedBox(height: 10),
-                Text(
-                  'Pick a smaller slice for fast iteration or scan the whole accessible library.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: HiveColors.textSecondary,
-                  ),
-                ),
-                if (rememberedScope != null) ...[
-                  const SizedBox(height: 18),
-                  _ScopeOptionTile(
-                    title: 'Use Last Scan Scope',
-                    subtitle:
-                        '${rememberedScope!.label} • ${rememberedScope!.description}',
-                    icon: Icons.history_rounded,
-                    emphasized: true,
-                    onTap: () => Navigator.of(context).pop(rememberedScope),
-                  ),
-                ],
-                const SizedBox(height: 18),
-                _ScopeOptionTile(
-                  title: 'All Photos',
-                  subtitle: 'Scan the full accessible library.',
-                  icon: Icons.photo_library_rounded,
-                  onTap: () =>
-                      Navigator.of(context).pop(const ScanScope.allPhotos()),
-                ),
-                const SizedBox(height: 10),
-                _ScopeOptionTile(
-                  title: 'Limited-Access Photos',
-                  subtitle:
-                      'Scan the photos currently available to HIVE under limited access.',
-                  icon: Icons.verified_user_outlined,
-                  onTap: () => Navigator.of(
-                    context,
-                  ).pop(const ScanScope.limitedPhotos()),
-                ),
-                const SizedBox(height: 18),
-                Text(
-                  'Albums & Folders',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: HiveColors.honey,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                if (snapshot.connectionState != ConnectionState.done)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 12),
-                    child: Center(child: CircularProgressIndicator()),
-                  )
-                else if (albums.isEmpty)
-                  Text(
-                    'No smaller albums are available yet. You can still scan all accessible photos.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: HiveColors.textSecondary,
-                    ),
-                  )
-                else
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 320),
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: albums.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 10),
-                      itemBuilder: (context, index) {
-                        final album = albums[index];
-                        return _ScopeOptionTile(
-                          title: album.name,
-                          subtitle:
-                              '${album.assetCount} assets • ${album.isFolder ? 'Folder' : 'Album'}',
-                          icon: album.isFolder
-                              ? Icons.folder_open_rounded
-                              : Icons.collections_bookmark_rounded,
-                          onTap: () => Navigator.of(context).pop(
-                            ScanScope.album(
-                              albumId: album.id,
-                              albumName: album.name,
-                              isFolder: album.isFolder,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-              ],
-            );
-          },
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text('Choose Scan Scope', style: theme.textTheme.headlineSmall),
+            const SizedBox(height: 10),
+            Text(
+              'Pick the whole accessible library or select one album for a targeted debug pass.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: HiveColors.textSecondary,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _ScopeOptionTile(
+              title: 'Full library',
+              subtitle: 'Scan the full accessible library.',
+              icon: Icons.photo_library_rounded,
+              onTap: () =>
+                  Navigator.of(context).pop(_ScopePickerAction.fullLibrary),
+            ),
+            const SizedBox(height: 10),
+            _ScopeOptionTile(
+              title: 'By album',
+              subtitle: 'Pick one album for a smaller targeted scan.',
+              icon: Icons.collections_bookmark_rounded,
+              onTap: () => Navigator.of(context).pop(_ScopePickerAction.album),
+            ),
+          ],
         ),
       ),
     );
+  }
+}
+
+class _AlbumPickerSheet extends StatelessWidget {
+  const _AlbumPickerSheet({required this.albums, this.selectedAlbumId});
+
+  final List<PhotoAlbum> albums;
+  final String? selectedAlbumId;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: HiveColors.outline,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text('Select Album', style: theme.textTheme.headlineSmall),
+            const SizedBox(height: 10),
+            Text(
+              'Choose one album for this scan. Thumbnails and multi-select can wait for a later pass.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: HiveColors.textSecondary,
+              ),
+            ),
+            const SizedBox(height: 18),
+            if (albums.isEmpty)
+              Text(
+                'No albums are available yet.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: HiveColors.textSecondary,
+                ),
+              )
+            else
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 420),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: albums.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (context, index) {
+                    final album = albums[index];
+                    return _AlbumOptionTile(
+                      album: album,
+                      selected: album.id == selectedAlbumId,
+                      onTap: () => Navigator.of(context).pop(album),
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AlbumOptionTile extends StatelessWidget {
+  const _AlbumOptionTile({
+    required this.album,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PhotoAlbum album;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final badgeLabel = album.isSmartAlbum
+        ? 'Smart'
+        : album.isUserAlbum
+        ? null
+        : 'System';
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: onTap,
+        child: Ink(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: selected
+                ? HiveColors.honey.withValues(alpha: 0.14)
+                : HiveColors.surface.withValues(alpha: 0.9),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: selected
+                  ? HiveColors.honey.withValues(alpha: 0.32)
+                  : HiveColors.outline,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected
+                    ? Icons.check_circle_rounded
+                    : Icons.collections_bookmark_rounded,
+                color: HiveColors.honey,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(album.title, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatAlbumAssetCount(album.assetCount),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: HiveColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (badgeLabel != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: HiveColors.surfaceMuted,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    badgeLabel,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: HiveColors.textSecondary,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _formatAlbumAssetCount(int count) {
+    if (count == 1) {
+      return '1 asset';
+    }
+
+    return '$count assets';
   }
 }
 
@@ -784,14 +1183,12 @@ class _ScopeOptionTile extends StatelessWidget {
     required this.subtitle,
     required this.icon,
     required this.onTap,
-    this.emphasized = false,
   });
 
   final String title;
   final String subtitle;
   final IconData icon;
   final VoidCallback onTap;
-  final bool emphasized;
 
   @override
   Widget build(BuildContext context) {
@@ -805,15 +1202,9 @@ class _ScopeOptionTile extends StatelessWidget {
         child: Ink(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: emphasized
-                ? HiveColors.honey.withValues(alpha: 0.14)
-                : HiveColors.surface.withValues(alpha: 0.9),
+            color: HiveColors.surface.withValues(alpha: 0.9),
             borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color: emphasized
-                  ? HiveColors.honey.withValues(alpha: 0.22)
-                  : HiveColors.outline,
-            ),
+            border: Border.all(color: HiveColors.outline),
           ),
           child: Row(
             children: [

@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
 import 'package:hive_flutter_v1/data/services/photo_manager_media_library_service.dart';
+import 'package:hive_flutter_v1/domain/entities/media_asset.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 void main() {
@@ -109,7 +110,7 @@ void main() {
       expect(
         logs.any(
           (entry) =>
-              entry.contains('scope=limitedPhotos') &&
+              entry.contains('scope=limited_library') &&
               entry.contains('path=limited_root'),
         ),
         isTrue,
@@ -157,7 +158,7 @@ void main() {
     expect(
       logs.any(
         (entry) =>
-            entry.contains('scope=allPhotos') &&
+            entry.contains('scope=full_library') &&
             entry.contains('path=global_library'),
       ),
       isTrue,
@@ -257,6 +258,115 @@ void main() {
       isTrue,
     );
   });
+
+  test(
+    'fetchAlbums maps photo manager paths into PhotoAlbum metadata',
+    () async {
+      final logs = <String>[];
+      final paths = {
+        'album_empty': _pathMap(
+          id: 'album_empty',
+          name: 'Z Empty',
+          assetCount: 0,
+          isAll: false,
+          darwinCollectionType: 1,
+          darwinCollectionSubtype: 2,
+        ),
+        'album_favorites': _pathMap(
+          id: 'album_favorites',
+          name: 'Favorites',
+          assetCount: 4,
+          isAll: false,
+          darwinCollectionType: 2,
+          darwinCollectionSubtype: 203,
+        ),
+        'album_morocco': _pathMap(
+          id: 'album_morocco',
+          name: 'Morocco Trip',
+          assetCount: 6,
+          isAll: false,
+          darwinCollectionType: 1,
+          darwinCollectionSubtype: 2,
+        ),
+      };
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            switch (call.method) {
+              case 'getPermissionState':
+                return PermissionState.authorized.index;
+              case 'getAssetPathList':
+                return {
+                  'data': [
+                    paths['album_empty'],
+                    paths['album_favorites'],
+                    paths['album_morocco'],
+                  ],
+                };
+              case 'fetchPathProperties':
+                final id = (call.arguments as Map)['id'] as String;
+                return {
+                  'data': [paths[id]],
+                };
+              case 'getAssetCountFromPath':
+                final id = (call.arguments as Map)['id'] as String;
+                return paths[id]?['assetCount'] ?? 0;
+            }
+
+            return null;
+          });
+
+      final service = PhotoManagerMediaLibraryService(debugLog: logs.add);
+
+      final albums = await service.fetchAlbums(limit: 10);
+      final favorites = albums.singleWhere(
+        (album) => album.id == 'album_favorites',
+      );
+      final morocco = albums.singleWhere(
+        (album) => album.id == 'album_morocco',
+      );
+      expect(albums.map((album) => album.title), ['Favorites', 'Morocco Trip']);
+      expect(favorites.isSmartAlbum, isTrue);
+      expect(favorites.isUserAlbum, isFalse);
+      expect(favorites.subtype, 'smartAlbumFavorites');
+      expect(morocco.isSmartAlbum, isFalse);
+      expect(morocco.isUserAlbum, isTrue);
+      expect(morocco.subtype, 'albumRegular');
+      expect(albums.any((album) => album.id == 'album_empty'), isFalse);
+      expect(
+        logs.any((entry) => entry.contains('[HIVE-ALBUM] discovered albums=2')),
+        isTrue,
+      );
+    },
+  );
+
+  test('maps screenshot subtype metadata to screenshot assets', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          switch (call.method) {
+            case 'getPermissionState':
+              return PermissionState.authorized.index;
+            case 'getAssetsByRange':
+              return {
+                'data': [
+                  _assetMap(
+                    id: 'screen_1',
+                    title: 'IMG_1234.PNG',
+                    subtype: 1 << 2,
+                  ),
+                ],
+              };
+          }
+
+          return null;
+        });
+
+    final service = PhotoManagerMediaLibraryService();
+    final assets = await service.fetchAssets(page: 0, pageSize: 1);
+
+    expect(assets, hasLength(1));
+    expect(assets.single.type, MediaAssetType.screenshot);
+  });
 }
 
 Map<String, dynamic> _pathMap({
@@ -264,19 +374,26 @@ Map<String, dynamic> _pathMap({
   required String name,
   required int assetCount,
   required bool isAll,
+  int albumType = 1,
+  int darwinCollectionType = 1,
+  int darwinCollectionSubtype = 2,
 }) {
   return {
     'id': id,
     'name': name,
     'assetCount': assetCount,
     'isAll': isAll,
-    'albumType': 1,
-    'darwinAssetCollectionType': 1,
-    'darwinAssetCollectionSubtype': 209,
+    'albumType': albumType,
+    'darwinAssetCollectionType': darwinCollectionType,
+    'darwinAssetCollectionSubtype': darwinCollectionSubtype,
   };
 }
 
-Map<String, dynamic> _assetMap({required String id, required String title}) {
+Map<String, dynamic> _assetMap({
+  required String id,
+  required String title,
+  int subtype = 0,
+}) {
   return {
     'id': id,
     'type': 1,
@@ -285,7 +402,7 @@ Map<String, dynamic> _assetMap({required String id, required String title}) {
     'duration': 0,
     'orientation': 0,
     'title': title,
-    'subtype': 0,
+    'subtype': subtype,
     'createDt': 1713528000,
     'modifiedDt': 1713528000,
   };

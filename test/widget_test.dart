@@ -14,6 +14,7 @@ import 'package:hive_flutter_v1/application/models/folder_detail_item.dart';
 import 'package:hive_flutter_v1/application/models/hive_cell_category.dart';
 import 'package:hive_flutter_v1/application/models/media_album.dart';
 import 'package:hive_flutter_v1/application/models/scan_scope.dart';
+import 'package:hive_flutter_v1/application/services/asset_reclassification_service.dart';
 import 'package:hive_flutter_v1/application/services/asset_preview_service.dart';
 import 'package:hive_flutter_v1/application/services/folder_detail_service.dart';
 import 'package:hive_flutter_v1/application/services/home_dashboard_service.dart';
@@ -31,6 +32,7 @@ import 'package:hive_flutter_v1/domain/models/photo_permission_status.dart';
 import 'package:hive_flutter_v1/main.dart';
 import 'package:hive_flutter_v1/presentation/screens/folder_detail_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/home_screen.dart';
+import 'package:hive_flutter_v1/presentation/screens/photo_viewer_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/scan_progress_screen.dart';
 import 'package:hive_flutter_v1/presentation/screens/splash_screen.dart';
 import 'package:hive_flutter_v1/presentation/theme/app_theme.dart';
@@ -187,6 +189,7 @@ void main() {
 
     expect(find.text('Asset Viewer'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
+    expect(find.text('Re-classify This Asset'), findsOneWidget);
     expect(find.text('Why This Landed Here'), findsOneWidget);
     expect(find.text('Browse this cell'), findsOneWidget);
     expect(find.text('1 of 2'), findsWidgets);
@@ -199,6 +202,105 @@ void main() {
     expect(find.text('Classification Status'), findsOneWidget);
     expect(find.text('dog'), findsWidgets);
   });
+
+  testWidgets(
+    'Placement Detail shows final decision debug fields for unsorted results',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(430, 932);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final labels = _debugSampleLabels();
+      final item = FolderDetailItem(
+        asset: MediaAsset(
+          id: 'asset_unsorted_1',
+          type: MediaAssetType.image,
+          createdAt: DateTime(2026, 4, 18),
+          modifiedAt: DateTime(2026, 4, 18),
+          width: 1200,
+          height: 1600,
+          originalFilename: 'IMG_9999.HEIC',
+        ),
+        title: 'IMG_9999.HEIC',
+        subtitle: 'Photo • 2026-04-18',
+        mappingExplanation: AssetMappingExplanation(
+          cellId: 'unsorted',
+          cellName: 'Unsorted',
+          score: 0.96,
+          usedFallback: true,
+          topLabels: labels,
+          matchedKeywords: const [
+            'top candidate Places',
+            'runner-up Travel',
+            'margin too narrow 0.09',
+            'required margin 0.10',
+          ],
+          fallbackReason: UnsortedFallbackReason.ambiguousMulti,
+          unsortedReason: UnsortedReason.ambiguousMulti,
+          topCandidateCellId: 'places',
+          topCandidateCellName: 'Places',
+          topCandidateScore: 0.96,
+          runnerUpCellId: 'travel',
+          runnerUpCellName: 'Travel',
+          runnerUpScore: 0.87,
+          winningMargin: 0.09,
+          requiredMargin: 0.10,
+          fallbackThreshold: 0.52,
+          blockedByMargin: true,
+          blockedByLowConfidence: false,
+          finalDecisionSummary:
+              'Unsorted because Places only led Travel by 0.09, below the 0.10 margin requirement.',
+        ),
+        classificationOutcome: ClassificationOutcome(
+          assetId: 'asset_unsorted_1',
+          status: ClassificationOutcomeStatus.succeeded,
+          labels: labels,
+          classificationRan: true,
+          imagePreparationSucceeded: true,
+          noLabelsReturned: false,
+          modelIdentifier: 'test',
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.darkTheme,
+          home: PhotoViewerScreen(
+            item: item,
+            originCellId: 'unsorted',
+            originCellName: 'Unsorted',
+            manualRecategorizationService: _FakeManualRecategorizationService(
+              onMove: (assetId, targetCellId) {},
+            ),
+            assetReclassificationService: _FakeAssetReclassificationService(
+              itemToReturn: item,
+            ),
+            thumbnailService: _FakeThumbnailService(),
+            assetPreviewService: _FakeAssetPreviewService(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Why This Landed Here'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Why It Was Unsorted'), findsOneWidget);
+      expect(find.text('Ambiguous result'), findsOneWidget);
+      expect(find.text('Top categories were too close'), findsOneWidget);
+      expect(
+        find.textContaining('Places only led Travel by 0.09'),
+        findsOneWidget,
+      );
+      expect(find.text('Top Candidate'), findsOneWidget);
+      expect(find.text('Runner-up'), findsOneWidget);
+      expect(find.text('Winning Margin'), findsOneWidget);
+      expect(find.text('Required Margin'), findsOneWidget);
+    },
+  );
 
   testWidgets('HomeScreen can choose a smaller scan scope', (
     WidgetTester tester,
@@ -223,19 +325,59 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Start Scan'));
+    await tester.tap(find.text('By album'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose Scan Scope'), findsOneWidget);
+    expect(find.text('Select Album'), findsOneWidget);
     expect(find.text('Summer Roll'), findsOneWidget);
 
     await tester.tap(find.text('Summer Roll'));
     await tester.pumpAndSettle();
 
+    expect(find.text('Scope: Summer Roll (8)'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Start Scan'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start Scan'));
+    await tester.pumpAndSettle();
+
     expect(find.text('Scan Progress'), findsOneWidget);
     expect(find.text('Scanning your library'), findsOneWidget);
-    expect(find.text('Scope • Summer Roll'), findsOneWidget);
+    expect(find.text('Album: Summer Roll — 8 assets'), findsOneWidget);
     expect(find.text('3 of 8'), findsOneWidget);
+  });
+
+  testWidgets('HomeScreen starts with full library scope by default', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: HomeScreen(
+          homeDashboardService: _FakeHomeDashboardService(),
+          mediaLibraryService: _FakeMediaLibraryService(),
+          createScanCoordinator: _FakeScanCoordinator.new,
+          settingsService: InMemorySettingsService(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scope: Full library'), findsOneWidget);
+
+    await tester.tap(find.text('Start Scan'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan Progress'), findsOneWidget);
+    expect(find.text('Full library — 529 assets'), findsOneWidget);
+    expect(find.text('12 of 529'), findsOneWidget);
   });
 
   testWidgets('ScanProgressScreen shows polished completion actions', (
@@ -268,7 +410,7 @@ void main() {
     expect(find.text('Scanned assets'), findsOneWidget);
     expect(find.text('Generated cells'), findsOneWidget);
     expect(find.text('Scope'), findsOneWidget);
-    expect(find.text('Summer Roll'), findsWidgets);
+    expect(find.text('Album: Summer Roll — 8 assets'), findsWidgets);
     expect(find.text('View Results'), findsWidgets);
     expect(find.text('Rescan'), findsOneWidget);
     expect(find.text('Change Scope'), findsOneWidget);
@@ -304,15 +446,23 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Use Last Scan Scope'), findsOneWidget);
     expect(find.text('Last scope'), findsOneWidget);
     expect(find.text('Summer Roll'), findsWidgets);
 
-    await tester.tap(find.text('Use Last Scan Scope'));
+    await tester.ensureVisible(find.text('Use'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Use'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scope: Summer Roll'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Start Scan'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start Scan'));
     await tester.pumpAndSettle();
 
     expect(find.text('Scan Progress'), findsOneWidget);
-    expect(find.text('Scope • Summer Roll'), findsOneWidget);
+    expect(find.text('Album: Summer Roll — 8 assets'), findsOneWidget);
   });
 
   testWidgets('HomeScreen shows a polished first-scan empty state', (
@@ -430,6 +580,7 @@ void main() {
 
     expect(find.text('Asset Viewer'), findsOneWidget);
     expect(find.text('Move to Cell'), findsOneWidget);
+    expect(find.text('Re-classify This Asset'), findsOneWidget);
     await tester.tap(find.text('Move to Cell'));
     await tester.pumpAndSettle();
 
@@ -447,6 +598,72 @@ void main() {
     expect(manualRecategorizationService.movedAssetId, 'asset_1');
     expect(manualRecategorizationService.targetCellId, 'people');
   });
+
+  testWidgets(
+    'PhotoViewerScreen can reclassify one asset and refresh its cell',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(430, 932);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final snapshot = _buildFolderDetailSnapshot(
+        cellId: 'pets',
+        cellName: 'Pets',
+      );
+      final currentItem = snapshot.items.first;
+      final reclassificationService = _FakeAssetReclassificationService(
+        itemToReturn: FolderDetailItem(
+          asset: currentItem.asset,
+          title: currentItem.title,
+          subtitle: currentItem.subtitle,
+          mappingExplanation: AssetMappingExplanation(
+            cellId: 'documents_receipts',
+            cellName: 'Documents / Receipts',
+            score: 1.24,
+            usedFallback: false,
+            topLabels: currentItem.classificationOutcome!.labels,
+            matchedKeywords: const ['document', 'receipt'],
+          ),
+          classificationOutcome: currentItem.classificationOutcome,
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.darkTheme,
+          home: PhotoViewerScreen(
+            item: currentItem,
+            items: snapshot.items,
+            initialIndex: 0,
+            originCellId: 'pets',
+            originCellName: 'Pets',
+            manualRecategorizationService: _FakeManualRecategorizationService(
+              onMove: (assetId, targetCellId) {},
+            ),
+            assetReclassificationService: reclassificationService,
+            thumbnailService: _FakeThumbnailService(),
+            assetPreviewService: _FakeAssetPreviewService(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Re-classify This Asset'));
+      await tester.tap(find.text('Re-classify This Asset'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(reclassificationService.requestedAssetId, 'asset_1');
+      expect(
+        find.textContaining('Current Cell · Documents / Receipts'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Re-classified locally.'), findsOneWidget);
+    },
+  );
 }
 
 class _FakePermissionService implements PermissionService {
@@ -600,6 +817,11 @@ class _FakeMediaLibraryService implements MediaLibraryService {
   }
 
   @override
+  Future<List<PhotoAlbum>> fetchAlbums({int limit = 24}) async {
+    return getAvailableAlbums(limit: limit);
+  }
+
+  @override
   Future<List<MediaAlbum>> getAvailableAlbums({int limit = 24}) async {
     return const [
       MediaAlbum(id: 'album_summer', name: 'Summer Roll', assetCount: 8),
@@ -673,6 +895,20 @@ class _FakeManualRecategorizationService
   }
 }
 
+class _FakeAssetReclassificationService
+    implements AssetReclassificationService {
+  _FakeAssetReclassificationService({required this.itemToReturn});
+
+  final FolderDetailItem itemToReturn;
+  String? requestedAssetId;
+
+  @override
+  Future<FolderDetailItem?> reclassifyAsset({required String assetId}) async {
+    requestedAssetId = assetId;
+    return itemToReturn;
+  }
+}
+
 class _FakeThumbnailService implements ThumbnailService {
   @override
   Future<void> clearCache() async {}
@@ -693,11 +929,8 @@ class _FakeAssetPreviewService implements AssetPreviewService {
   }
 }
 
-FolderDetailSnapshot _buildFolderDetailSnapshot({
-  required String cellId,
-  required String cellName,
-}) {
-  final labels = [
+List<ClassificationLabel> _debugSampleLabels() {
+  return [
     ClassificationLabel(
       id: 'dog',
       key: 'dog',
@@ -708,6 +941,13 @@ FolderDetailSnapshot _buildFolderDetailSnapshot({
       modelIdentifier: 'test',
     ),
   ];
+}
+
+FolderDetailSnapshot _buildFolderDetailSnapshot({
+  required String cellId,
+  required String cellName,
+}) {
+  final labels = _debugSampleLabels();
 
   return FolderDetailSnapshot(
     cellId: cellId,

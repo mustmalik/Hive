@@ -1,4 +1,5 @@
 import '../../application/repositories/media_asset_repository.dart';
+import '../../application/models/scan_scope.dart';
 import '../../application/services/media_library_service.dart';
 import '../../domain/entities/media_asset.dart';
 
@@ -16,11 +17,13 @@ class MediaLibraryIngestionAdapter {
     DateTime? updatedAfter,
     int page = 0,
     int pageSize = 200,
+    ScanScope scope = const ScanScope.fullLibrary(),
   }) async {
     final assets = await _mediaLibraryService.fetchAssets(
       updatedAfter: updatedAfter,
       page: page,
       pageSize: pageSize,
+      scope: scope,
     );
 
     if (assets.isNotEmpty) {

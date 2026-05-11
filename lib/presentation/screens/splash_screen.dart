@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../application/models/classification_backend.dart';
 import '../../application/services/permission_service.dart';
 import '../../application/services/settings_service.dart';
 import '../../data/services/local_settings_service.dart';
@@ -30,10 +31,16 @@ HiveLaunchDestination resolveHiveLaunchDestination({
 }
 
 class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key, this.permissionService, this.settingsService});
+  const SplashScreen({
+    super.key,
+    this.permissionService,
+    this.settingsService,
+    this.classificationBackend = ClassificationBackend.appleVision,
+  });
 
   final PermissionService? permissionService;
   final SettingsService? settingsService;
+  final ClassificationBackend classificationBackend;
 
   @override
   State<SplashScreen> createState() => _SplashScreenState();
@@ -78,13 +85,16 @@ class _SplashScreenState extends State<SplashScreen> {
       HiveLaunchDestination.onboarding => OnboardingScreen(
         permissionService: _permissionService,
         settingsService: _settingsService,
+        classificationBackend: widget.classificationBackend,
       ),
       HiveLaunchDestination.permission => PermissionScreen(
         permissionService: _permissionService,
         settingsService: _settingsService,
+        classificationBackend: widget.classificationBackend,
       ),
       HiveLaunchDestination.home => HomeScreen(
         settingsService: _settingsService,
+        classificationBackend: widget.classificationBackend,
       ),
     };
 
